@@ -35,3 +35,7 @@ Le RGPD ne s'applique pas automatiquement aux données collectées à l'étrange
 - Webhooks signés `HMAC-SHA256(secret, timestamp + "." + corps)` ; destinations privées refusées.
 - Export CSV protégé contre l'injection de formules.
 - Image distroless non-root ; aucun secret journalisé (`Config.Redacted`).
+
+## Journaux et accès des agents (MCP)
+- La table `events` conserve les avertissements et erreurs pendant `EVENTS_RETENTION` (7 jours par défaut), puis les purge. Les secrets sont masqués avant tout stockage. Les messages peuvent contenir des noms d'entreprises ou des requêtes de clients : la lecture (`/v1/logs`, outil `get_logs`) est réservée à la clé `admin`.
+- Les outils MCP renvoient les fiches en mode compact, **sans avis** : les avis contiennent des données personnelles de tiers (auteurs). `include_reviews` est un choix explicite, limité à 3 avis tronqués par fiche, sans lien vers le profil de l'auteur. Les exports restent soumis aux mêmes règles que l'API REST (base légale, information, opposition).

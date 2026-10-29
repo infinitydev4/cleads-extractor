@@ -12,6 +12,7 @@ API REST en Go pour **rechercher, extraire, normaliser, dédupliquer, enrichir e
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Résultats mesurés, méthode, projection de capacité |
 | [docs/RAILWAY.md](docs/RAILWAY.md) | Déploiement pas à pas, dimensionnement, exploitation |
 | [docs/COMPLIANCE.md](docs/COMPLIANCE.md) | Licences des sources, RGPD/CNIL, sécurité |
+| [docs/MCP.md](docs/MCP.md) | Serveur MCP pour agents LLM : outils, ressources, configuration de Claude Desktop / Claude Code |
 | `GET /docs` | Référence OpenAPI interactive (spécification : `internal/api/openapi.yaml`) |
 
 ## Démarrage rapide
@@ -55,15 +56,42 @@ curl -s "$URL/v1/businesses?postal_code=69&category=plomb&has_email=true" -H "Au
 
 Par défaut, les commerces sans rapport que Google ajoute en fin de liste sont écartés (`"include_unrelated": true` pour tout garder). Un job accepte une zone sous l'une des trois formes : `location` (géocodée), `bbox`, ou `center` + `radius_m`. `sector` (voir `GET /v1/sectors`) traduit l'activité dans la classification native de chaque source (type Google, tag OSM, code NAF) ; `query` permet une recherche libre. `GET /v1/sources` liste les sources actives sur le serveur.
 
+### Agents LLM (MCP)
+Les agents (Claude Desktop, Claude Code…) pilotent l'API par le **Model Context Protocol** : 15 outils pour chercher, attendre avec notifications de progression, lire les résultats en mode compact, exporter, interroger la base et **diagnostiquer** (erreurs regroupées par cause, santé des sources, journaux). Le SDK Go officiel est en v1.8.0, spécification 2026-07-28.
+
+```bash
+# HTTP : /mcp sur le même domaine, mêmes clés API
+claude mcp add --transport http cleads "$URL/mcp" --header "Authorization: Bearer $KEY"
+# stdio : le binaire local parle à l'instance distante par l'API REST
+CLEADS_URL=$URL CLEADS_API_KEY=$KEY ./bin/cleads-mcp     # ou : cleads-extractor mcp
+```
+
+Voir [docs/MCP.md](docs/MCP.md).
+
+### Diagnostic
+Les avertissements et erreurs de **tous** les processus (API et workers, même sur d'autres machines) sont copiés de façon asynchrone dans la table `events`, avec secrets masqués et rétention de 7 jours. Les workers publient l'état de leurs disjoncteurs et de leur débit adaptatif toutes les 10 s.
+
+```bash
+curl -s "$URL/v1/jobs/$ID/errors" -H "Authorization: Bearer $KEY"        # échecs groupés par cause
+curl -s "$URL/v1/jobs/$ID/tasks?status=failed" -H "Authorization: Bearer $KEY"
+curl -s "$URL/v1/health/summary" -H "Authorization: Bearer $KEY"         # « Google nous bloque-t-il ? »
+curl -s "$URL/v1/logs?level=warn&since=1h" -H "Authorization: Bearer $ADMIN_KEY"   # clé admin uniquement
+```
+
 ### Les quatre compteurs
 Chaque job expose `raw_found` (tout ce que les sources ont renvoyé), `unique` (après dédup), `complete` (identité, adresse, téléphone et site ou email) et `crm_useful` (en activité et joignable par au moins un canal). Les mêmes séries existent dans `/metrics`, par source.
 
 ## Structure
 
 ```
-cmd/server        binaire (ROLE=api|worker|all)
+cmd/server        binaire (ROLE=api|worker|all ; « mcp » = serveur MCP stdio)
+cmd/mcp           serveur MCP stdio (cleads-mcp) qui pilote une instance distante par REST
 cmd/bench         benchmark bout-en-bout reproductible
-internal/api      handlers REST, SSE, export, auth, OpenAPI
+internal/api      handlers REST, SSE, export, auth, OpenAPI, /mcp, diagnostic
+internal/backend  contrat commun REST / MCP (implémenté en direct et par apiclient)
+internal/mcpserver outils, ressources et prompts MCP
+internal/apiclient client REST (mode stdio)
+internal/obs      tee slog → table events, tampon circulaire, masquage des secrets
 internal/engine   planification, pools par source, retries, quadtree, webhooks
 internal/source   placesapi · osm · sirene · gmapshttp · gmapsbrowser · mock
 internal/store    interface + pgstore (production) + memstore (tests/dev)
@@ -82,6 +110,8 @@ make race        # détecteur de concurrence
 make test-pg TEST_DSN=postgres://...   # intégration PostgreSQL (tables vidées !)
 make bench       # micro-benchmarks
 ```
+
+Les outils MCP sont testés sur le transport en mémoire du SDK (memstore + source `mock`), sur HTTP et en sous-processus stdio. Ces tests couvrent l'authentification, l'isolation, les droits `admin` des journaux, la projection et les bornes de taille, la progression de `wait_for_job`, le masquage des secrets et le tee non bloquant sous charge. Aucun test n'appelle Internet.
 
 La suite couvre : parsing sur fixtures réelles Google Maps, chaque source contre un serveur simulé (pagination, saturation, erreurs 429/403/5xx, bascule de miroirs), normalisation, dédup inter-sources, 8 écrivains concurrents sur PostgreSQL (aucun doublon créé), quota `max_results` exact sous concurrence, exclusivité des baux et fencing, reprise après bail expiré, annulation, API (auth, isolation des clés, idempotence, SSE, pagination, export, rate-limit).
 

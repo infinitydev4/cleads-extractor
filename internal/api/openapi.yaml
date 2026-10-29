@@ -11,6 +11,10 @@ info:
     `GET /v1/jobs/{id}/businesses?cursor=…` → export with
     `GET /v1/jobs/{id}/export?format=csv`.
 
+    **MCP**: LLM agents use `POST /mcp` (Model Context Protocol, Streamable
+    HTTP, same API keys) — see docs/MCP.md. Diagnostics: `/v1/jobs/{id}/errors`,
+    `/v1/jobs/{id}/tasks`, `/v1/health/summary`, `/v1/logs` (admin key).
+
     **Throughput counters** are reported separately: `raw_found` (everything
     sources returned), `unique` (after deduplication), `complete` (identity,
     address, phone and website/email) and `crm_useful` (operating and

@@ -83,3 +83,27 @@ Chaque fiche porte des **clés de blocage** de la plus forte à la plus faible :
 | Export | Streaming par pages de 2 000 en keyset | Mémoire constante, export possible pendant que le job tourne. |
 | Mémoire | `GOMEMLIMIT` dérivé du cgroup (90 %) | Le GC travaille avant l'OOM killer de Railway. |
 | Image | distroless static, non-root | ~20 Mo, surface d'attaque minimale. |
+
+## 4. Observabilité et serveur MCP (29/10/2026)
+
+**Problème** : les erreurs n'étaient visibles que sur la sortie standard de chaque processus. Les workers tournent sur d'autres machines, donc ni l'API ni un agent ne pouvaient expliquer un job en échec.
+
+**Décisions** :
+
+| Sujet | Choix | Raison |
+|---|---|---|
+| Journaux partagés | Table `events` (migration 002) alimentée par un `slog.Handler` « tee » : stdout inchangé, plus une copie **asynchrone, par lots et sans blocage** des WARN+ vers la base ; la file pleine fait abandonner l'événement, compté dans `cleads_log_events_total{outcome="dropped"}` | La base existe déjà dans tous les rôles ; aucun service de journaux à ajouter ; le moteur n'attend jamais la base (testé : 40 000 avertissements en 0,16 s avec une base bloquée) |
+| Rétention | Purge horaire, `EVENTS_RETENTION` (7 jours par défaut) | Volume borné, DELETE indexé sur `ts` |
+| État des sources | Battement de cœur `workers` toutes les 10 s : débit adaptatif, disjoncteur, issues des 5 dernières minutes par source | Gouverneurs et disjoncteurs vivent en mémoire de chaque worker ; l'API agrège les workers vivants pour `/v1/health/summary` |
+| Débogage local | Tampon circulaire des INFO+ du processus (`LOG_RING_SIZE`), converti et masqué seulement à la lecture | ~1 µs par ligne INFO, aucune écriture en base |
+| Secrets | `obs.Redactor` : formes génériques (identifiants dans les URL, `Bearer`, `clé=valeur`, `?key=`) et valeurs exactes de la configuration (clés API, mot de passe de la DSN, proxies, secret de webhook) ; appliqué à stdout, aux événements, au tampon, aux erreurs de tâches et aux réponses | « Aucun secret dans les journaux, les ressources ou les erreurs » |
+| Contrat d'accès | `internal/backend.Backend`, implémenté en direct (`api.Server.Backend(clé)`, utilisé aussi par les routes REST) et par HTTP (`apiclient`) | Les outils MCP sont écrits une seule fois, et le REST, `/mcp` et le stdio appliquent exactement les mêmes règles |
+| MCP | SDK Go officiel v1.8.0 (spécification 2026-07-28), Streamable HTTP **sans état** sur `/mcp` dans le même binaire, et stdio par REST | Pas d'affinité de session avec N réplicas ; même authentification, même rate-limit et même isolation que le REST ; le mode stdio n'a pas besoin de la base |
+
+```
+ workers (N machines) ──slog tee──► events  ◄──┐
+       │                                        ├── API : /v1/logs, /v1/jobs/{id}/errors, /v1/health/summary
+       └──heartbeat 10 s──────────► workers ◄──┘         └── /mcp (outils) ◄── agents
+```
+
+Dépendances ajoutées : `github.com/modelcontextprotocol/go-sdk`, nécessaire pour MCP, et `github.com/google/jsonschema-go`, déjà tirée par le SDK et utilisée pour déclarer énumérations et bornes dans les schémas d'outils. `prometheus/client_model`, déjà présente en indirect, devient directe (lecture des compteurs dans le benchmark et les tests).

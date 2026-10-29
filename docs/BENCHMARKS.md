@@ -44,6 +44,20 @@ Chaque run : 23 529 entreprises uniques, taux de doublons 68 % (chevauchements +
 
 **Lecture** : à 4 workers, supprimer la latence ne change plus rien → le goulot est **PostgreSQL** (≈ 500 tâches/s ≈ 2 400 uniques/s sur cette machine), pas le code Go. Ce plafond est **deux ordres de grandeur au-dessus** de l'objectif (50 000/jour ≈ 0,6/s en moyenne). La limite réelle sera celle des fournisseurs.
 
+### 2.1 Coût du tee de journaux (29/10/2026, ajout de l'observabilité)
+
+Même machine. PostgreSQL 16.14 jetable (`shared_buffers=256MB`). Même scénario qu'au §2 : 20 × 20 km, concurrence 64, 2 % d'échecs transitoires, soit ~100 avertissements par run. 3 runs alternés par configuration : binaire d'avant (`bench-before`, journaux jetés) et binaire d'après avec `-log-tee` (logger de production JSON + copie des WARN+ vers `events` + tampon circulaire + battements de cœur des workers). Chaque run produit 23 529 uniques.
+
+| Store | Workers | Uniques/s avant (médiane ; min–max) | Uniques/s après (médiane ; min–max) | RSS avant → après | Événements stockés / perdus |
+|---|---|---|---|---|---|
+| PostgreSQL | 1 | 1 345 (1 225–1 410) | 1 338 (1 308–1 615) | 32,0 → 32,8 Mo | ~97 / 0 |
+| PostgreSQL | 4 | 2 201 (1 997–2 888) | 2 137 (1 846–3 090) | 61,4 → 63,4 Mo | ~106 / 0 |
+| mémoire | 1 | 1 309 (1 266–1 628) | 1 606 (1 596–1 618) | 80,1 → 81,3 Mo | ~100 / 0 |
+
+**Lecture** : les écarts restent sous le bruit d'un run à l'autre (±20 % sur PostgreSQL local). Aucune régression n'est mesurable. Les micro-benchmarks (`go test -bench Tee ./internal/obs`) donnent le coût unitaire : un avertissement copié coûte 2,5 µs dans l'appelant ; une ligne INFO coûte ~1,9 µs au lieu de 1,2 µs pour un `JSONHandler` nu (tampon circulaire et masquage). Avec une base bloquée et une file de 16, 40 000 avertissements sur 8 goroutines prennent 0,16 s et sont comptés comme perdus : le moteur n'attend jamais.
+
+Non re-mesuré : le débit de l'API sous `ab` (§5). Le surcoût attendu est de ~1 µs par requête (une ligne INFO), à comparer à un p50 de 2 ms.
+
 ## 3. Scraping Google Maps réel — sans clé API (source par défaut)
 
 Source `google_maps_http` : recherche (20 fiches/page, paginée) puis fiche détaillée de chaque entreprise (`/maps/preview/place`, ~40 Ko), sans navigateur. Une seule IP résidentielle, aucun proxy, base vide à chaque run, enrichissement des sites désactivé sauf mention.

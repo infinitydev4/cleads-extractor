@@ -63,7 +63,13 @@ Générer une clé : `openssl rand -base64 32`.
 - **Déploiements** : SIGTERM → arrêt de la location de tâches, fin des tâches en cours (`SHUTDOWN_WINDOW`), sinon remise en file immédiate. Aucun travail perdu.
 - **Migrations** : appliquées au démarrage sous verrou consultatif (sans risque avec plusieurs réplicas).
 
-## 7. Valider la capacité après déploiement
+## 7. MCP et diagnostic
+- **`/mcp`** est servi par le service `api` (et `ROLE=all`) sur **le même domaine** que le REST, avec les mêmes clés API. Il n'y a rien à exposer en plus. Le transport est sans état, donc plusieurs réplicas `api` fonctionnent sans affinité de session. Les workers ne servent pas `/mcp`.
+- Variables utiles côté `api` : `PUBLIC_URL=https://<domaine>` (URL de téléchargement donnée aux agents par `export_job`), `MCP_ALLOWED_ORIGINS` (seulement si une application web appelle `/mcp` depuis un navigateur), `MCP_MAX_WAIT=120s`. Le proxy de Railway coupe les requêtes HTTP au bout de 15 minutes, bien au-delà de ce plafond.
+- **Journaux et santé** : `GET /v1/health/summary`, `GET /v1/jobs/{id}/errors`, `GET /v1/logs` (clé `admin`) lisent la table `events` et les battements de cœur des workers. Tous les réplicas écrivent dans ces tables ; `WORKER_ID` prend `RAILWAY_REPLICA_ID` par défaut. Volume : quelques dizaines d'octets par avertissement ; rétention `EVENTS_RETENTION=168h`.
+- Poste local relié à l'instance déployée (Claude Desktop ou Claude Code) : voir [MCP.md](MCP.md) §5.
+
+## 8. Valider la capacité après déploiement
 ```bash
 railway run --service worker -- go run ./cmd/bench -store pg -dsn "$DATABASE_URL" -workers 2 -area-km 20
 ```
