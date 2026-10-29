@@ -19,4 +19,7 @@ COPY --from=build /out/cleads-extractor /usr/local/bin/cleads-extractor
 ENV PORT=8080
 EXPOSE 8080
 USER nonroot:nonroot
+# The image has no shell or curl: the binary probes itself.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["/usr/local/bin/cleads-extractor", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/cleads-extractor"]
