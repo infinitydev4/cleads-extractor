@@ -91,7 +91,18 @@ Couverture des 891 fiches :
 | Description | 112 | 13 % |
 | Statut fermé correctement détecté | 6/6 sur un échantillon contrôlé | — |
 
-### 3.4 Ce que cela implique, et ce qui n'est pas mesuré
+### 3.4 International : Dubaï (Émirats arabes unis)
+
+Jobs lancés depuis la même IP française, **sans préciser le pays** (détecté par géocodage : AE).
+
+| Job | Durée | Req. recherche / détail | Erreurs | Uniques | Téléphones `+971` | Sites | Avis | Fiches/min |
+|---|---|---|---|---|---|---|---|---|
+| `plumber`, Dubai Marina, `enrich` | 30 s | 63 / 34 | 0 | 34 | 33 / 34 (100 % des numéros) | 26 (17 emails trouvés) | 29 | — |
+| `restaurant`, Dubai Marina | 130 s | 140 / 862 | 0 | 862 | 769 | 551 | 828 | ~400 |
+
+Recherche en arabe (`سباك`) également validée. Particularités traitées : numéros pris dans le format international fourni par Google (valable pour tous les pays), pays et ville lus dans le bloc adresse (pas de code postal aux Émirats), et géocodage mondial quand le pays n'est pas fourni. Sans ce dernier point, « Dubai Marina » se résolvait en un lieu homonyme… à Rennes.
+
+### 3.5 Ce que cela implique, et ce qui n'est pas mesuré
 
 - **Une IP à 8 req/s ≈ 350 fiches complètes/min.** 50 000 fiches/jour ≈ 65 000 requêtes, soit **0,8 req/s en moyenne** ; 100 000/jour ≈ 1,6 req/s. Les deux objectifs sont donc atteignables **en quelques heures** de travail effectif par jour, sur une IP.
 - **Non mesuré** : la tolérance de Google sur 24 h en continu, et depuis les IP de datacenter de Railway (en général plus surveillées que les IP résidentielles). Avant d'y monter en volume, lancer le même protocole depuis Railway ; prévoir des proxies résidentiels (`GMAPS_PROXIES`) pour 100 000+/jour.

@@ -282,3 +282,52 @@ func TestUnrelatedResultsAreDropped(t *testing.T) {
 		}
 	}
 }
+
+// countryGeocoder only knows Dubai worldwide, like Nominatim does when
+// filtered on the wrong country.
+type countryGeocoder struct{ calls []string }
+
+func (g *countryGeocoder) CountryAt(context.Context, domain.Point) (string, error) { return "AE", nil }
+
+func (g *countryGeocoder) Geocode(_ context.Context, q, country, _ string) (geocode.Result, error) {
+	g.calls = append(g.calls, country)
+	if country == "" || country == "AE" {
+		return geocode.Result{BBox: domain.BBox{MinLat: 25.07, MinLng: 55.12, MaxLat: 25.09, MaxLng: 55.15}, Country: "AE"}, nil
+	}
+	return geocode.Result{}, geocode.ErrNotFound
+}
+
+func TestLocationAbroadAdoptsGeocodedCountry(t *testing.T) {
+	st := memstore.New()
+	gc := &countryGeocoder{}
+	e := New(Config{PollMin: 5 * time.Millisecond, PollMax: 20 * time.Millisecond, FinalizeEvery: 20 * time.Millisecond},
+		st, []source.Source{mock.New(mock.Config{CellKm: 5})}, gc, nil, metrics.New(), quietLog())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = e.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	j := submit(t, st, domain.JobSpec{Query: "plumber", Location: "Dubai"}) // no country
+	j = waitDone(t, st, j.ID, 10*time.Second)
+	if j.Status != domain.JobCompleted || j.Counters.Unique == 0 {
+		t.Fatalf("job %+v", j)
+	}
+	if len(gc.calls) != 1 || gc.calls[0] != "" {
+		t.Fatalf("geocoder calls %v, want one worldwide search", gc.calls)
+	}
+	// explicit wrong country: worldwide second try
+	gc.calls = nil
+	j2 := domain.Job{ID: "job_explicit", Spec: domain.JobSpec{Query: "plumber", Location: "Dubai", Country: "FR", Language: "fr"},
+		Status: domain.JobQueued, CreatedAt: time.Now()}
+	if err := st.CreateJob(context.Background(), &j2, []domain.Task{PlanTask(&j2)}); err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, st, j2.ID, 10*time.Second)
+	if len(gc.calls) != 2 || gc.calls[0] != "FR" || gc.calls[1] != "" {
+		t.Fatalf("geocoder calls %v, want FR then worldwide", gc.calls)
+	}
+	rows, _ := st.ListJobBusinesses(context.Background(), j.ID, 0, 10, store.BusinessFilter{})
+	if len(rows) == 0 || rows[0].Country != "AE" {
+		t.Fatalf("records must carry the geocoded country, got %+v", rows)
+	}
+}

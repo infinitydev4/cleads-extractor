@@ -26,6 +26,10 @@ Les fiches d'entreprises individuelles, d'indépendants et les adresses email no
 - **Registre des traitements** : y inscrire ce traitement, ses sources et ses destinataires.
 - **Bloctel** ne s'applique qu'aux consommateurs, mais les entrepreneurs individuels peuvent y être inscrits : à vérifier avant toute prospection téléphonique.
 
+## Hors de France
+
+Le RGPD ne s'applique pas automatiquement aux données collectées à l'étranger, mais il s'applique à vous si vous êtes établi dans l'UE. Chaque pays a en plus son propre droit : aux Émirats, par exemple, la loi fédérale sur la protection des données personnelles (décret-loi n° 45 de 2021), des régimes distincts dans les zones franches DIFC et ADGM, et des règles de la TDRA sur les appels et SMS commerciaux. Faites valider la prospection par pays avant de l'industrialiser.
+
 ## Sécurité
 - Clés API stockées hachées (SHA-256), comparées en temps constant, rate-limit par clé, isolation des jobs par clé (sauf clé `admin`).
 - Webhooks signés `HMAC-SHA256(secret, timestamp + "." + corps)` ; destinations privées refusées.

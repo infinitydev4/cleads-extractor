@@ -22,9 +22,18 @@ import (
 
 var ErrNotFound = errors.New("location not found")
 
-// Geocoder resolves a location to a bounding box.
+// Result is a geocoded area.
+type Result struct {
+	BBox    domain.BBox
+	Country string // ISO 3166-1 alpha-2 of the match, when known
+}
+
+// Geocoder resolves a location to a bounding box. An empty country searches
+// worldwide.
 type Geocoder interface {
-	Geocode(ctx context.Context, query, country, lang string) (domain.BBox, error)
+	Geocode(ctx context.Context, query, country, lang string) (Result, error)
+	// CountryAt returns the ISO country code at a point ("" if unknown).
+	CountryAt(ctx context.Context, p domain.Point) (string, error)
 }
 
 // Nominatim uses OpenStreetMap's geocoder. The public instance allows 1 req/s
@@ -50,17 +59,17 @@ func NewNominatim(endpoint, ua string) *Nominatim {
 	}
 }
 
-func (n *Nominatim) Geocode(ctx context.Context, query, country, lang string) (domain.BBox, error) {
+func (n *Nominatim) Geocode(ctx context.Context, query, country, lang string) (Result, error) {
 	if err := n.limiter.Wait(ctx); err != nil {
-		return domain.BBox{}, err
+		return Result{}, err
 	}
-	q := url.Values{"q": {query}, "format": {"jsonv2"}, "limit": {"1"}}
+	q := url.Values{"q": {query}, "format": {"jsonv2"}, "limit": {"1"}, "addressdetails": {"1"}}
 	if country != "" {
 		q.Set("countrycodes", strings.ToLower(country))
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, n.Endpoint+"?"+q.Encode(), nil)
 	if err != nil {
-		return domain.BBox{}, err
+		return Result{}, err
 	}
 	req.Header.Set("User-Agent", n.UserAgent)
 	if lang != "" {
@@ -68,29 +77,60 @@ func (n *Nominatim) Geocode(ctx context.Context, query, country, lang string) (d
 	}
 	resp, err := n.Client.Do(req)
 	if err != nil {
-		return domain.BBox{}, err
+		return Result{}, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return domain.BBox{}, source.ClassifyHTTP(resp, body)
+		return Result{}, source.ClassifyHTTP(resp, body)
 	}
 	var out []struct {
 		BoundingBox []string `json:"boundingbox"` // [minLat, maxLat, minLon, maxLon]
+		Address     struct {
+			CountryCode string `json:"country_code"`
+		} `json:"address"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
-		return domain.BBox{}, fmt.Errorf("nominatim decode: %w", err)
+		return Result{}, fmt.Errorf("nominatim decode: %w", err)
 	}
 	if len(out) == 0 || len(out[0].BoundingBox) != 4 {
-		return domain.BBox{}, fmt.Errorf("%w: %q", ErrNotFound, query)
+		return Result{}, fmt.Errorf("%w: %q", ErrNotFound, query)
 	}
 	f := func(s string) float64 { v, _ := strconv.ParseFloat(s, 64); return v }
 	bb := out[0].BoundingBox
 	box := domain.BBox{MinLat: f(bb[0]), MaxLat: f(bb[1]), MinLng: f(bb[2]), MaxLng: f(bb[3])}
 	if !box.Valid() {
-		return domain.BBox{}, fmt.Errorf("%w: invalid bbox for %q", ErrNotFound, query)
+		return Result{}, fmt.Errorf("%w: invalid bbox for %q", ErrNotFound, query)
 	}
-	return box, nil
+	return Result{BBox: box, Country: strings.ToUpper(out[0].Address.CountryCode)}, nil
+}
+
+func (n *Nominatim) CountryAt(ctx context.Context, p domain.Point) (string, error) {
+	if err := n.limiter.Wait(ctx); err != nil {
+		return "", err
+	}
+	reverse := strings.Replace(n.Endpoint, "/search", "/reverse", 1)
+	q := url.Values{"lat": {strconv.FormatFloat(p.Lat, 'f', 6, 64)}, "lon": {strconv.FormatFloat(p.Lng, 'f', 6, 64)},
+		"format": {"jsonv2"}, "zoom": {"3"}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reverse+"?"+q.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", n.UserAgent)
+	resp, err := n.Client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Address struct {
+			CountryCode string `json:"country_code"`
+		} `json:"address"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return "", err
+	}
+	return strings.ToUpper(out.Address.CountryCode), nil
 }
 
 // Google uses the Geocoding API (viewport of the best result).
@@ -105,7 +145,7 @@ func NewGoogle(key string) *Google {
 		Client: source.NewHTTPClient(10*time.Second, 4, nil)}
 }
 
-func (g *Google) Geocode(ctx context.Context, query, country, lang string) (domain.BBox, error) {
+func (g *Google) Geocode(ctx context.Context, query, country, lang string) (Result, error) {
 	q := url.Values{"address": {query}, "key": {g.APIKey}}
 	if country != "" {
 		q.Set("region", strings.ToLower(country))
@@ -116,20 +156,24 @@ func (g *Google) Geocode(ctx context.Context, query, country, lang string) (doma
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.Endpoint+"?"+q.Encode(), nil)
 	if err != nil {
-		return domain.BBox{}, err
+		return Result{}, err
 	}
 	resp, err := g.Client.Do(req)
 	if err != nil {
-		return domain.BBox{}, err
+		return Result{}, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return domain.BBox{}, source.ClassifyHTTP(resp, body)
+		return Result{}, source.ClassifyHTTP(resp, body)
 	}
 	var out struct {
 		Status  string `json:"status"`
 		Results []struct {
+			AddressComponents []struct {
+				ShortName string   `json:"short_name"`
+				Types     []string `json:"types"`
+			} `json:"address_components"`
 			Geometry struct {
 				Viewport struct {
 					Northeast struct{ Lat, Lng float64 } `json:"northeast"`
@@ -143,17 +187,59 @@ func (g *Google) Geocode(ctx context.Context, query, country, lang string) (doma
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
-		return domain.BBox{}, err
+		return Result{}, err
 	}
 	if out.Status != "OK" || len(out.Results) == 0 {
-		return domain.BBox{}, fmt.Errorf("%w: %q (%s)", ErrNotFound, query, out.Status)
+		return Result{}, fmt.Errorf("%w: %q (%s)", ErrNotFound, query, out.Status)
 	}
 	g0 := out.Results[0].Geometry
 	ne, sw := g0.Viewport.Northeast, g0.Viewport.Southwest
 	if g0.Bounds != nil {
 		ne, sw = g0.Bounds.Northeast, g0.Bounds.Southwest
 	}
-	return domain.BBox{MinLat: sw.Lat, MinLng: sw.Lng, MaxLat: ne.Lat, MaxLng: ne.Lng}, nil
+	res := Result{BBox: domain.BBox{MinLat: sw.Lat, MinLng: sw.Lng, MaxLat: ne.Lat, MaxLng: ne.Lng}}
+	for _, c := range out.Results[0].AddressComponents {
+		for _, t := range c.Types {
+			if t == "country" {
+				res.Country = c.ShortName
+			}
+		}
+	}
+	return res, nil
+}
+
+func (g *Google) CountryAt(ctx context.Context, p domain.Point) (string, error) {
+	q := url.Values{"latlng": {fmt.Sprintf("%.6f,%.6f", p.Lat, p.Lng)}, "result_type": {"country"}, "key": {g.APIKey}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.Endpoint+"?"+q.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := g.Client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Results []struct {
+			AddressComponents []struct {
+				ShortName string   `json:"short_name"`
+				Types     []string `json:"types"`
+			} `json:"address_components"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return "", err
+	}
+	for _, r := range out.Results {
+		for _, c := range r.AddressComponents {
+			for _, t := range c.Types {
+				if t == "country" {
+					return c.ShortName, nil
+				}
+			}
+		}
+	}
+	return "", nil
 }
 
 // Cached wraps a Geocoder with an in-memory TTL cache.
@@ -165,7 +251,7 @@ type Cached struct {
 }
 
 type cacheEntry struct {
-	box domain.BBox
+	res Result
 	exp time.Time
 }
 
@@ -173,33 +259,54 @@ func NewCached(inner Geocoder, ttl time.Duration) *Cached {
 	return &Cached{Inner: inner, TTL: ttl, m: make(map[string]cacheEntry)}
 }
 
-func (c *Cached) Geocode(ctx context.Context, query, country, lang string) (domain.BBox, error) {
+func (c *Cached) Geocode(ctx context.Context, query, country, lang string) (Result, error) {
 	k := strings.ToLower(query) + "|" + country
 	c.mu.Lock()
 	if e, ok := c.m[k]; ok && time.Now().Before(e.exp) {
 		c.mu.Unlock()
-		return e.box, nil
+		return e.res, nil
 	}
 	c.mu.Unlock()
-	box, err := c.Inner.Geocode(ctx, query, country, lang)
+	res, err := c.Inner.Geocode(ctx, query, country, lang)
 	if err != nil {
-		return box, err
+		return res, err
 	}
 	c.mu.Lock()
 	if len(c.m) > 10_000 {
 		clear(c.m)
 	}
-	c.m[k] = cacheEntry{box: box, exp: time.Now().Add(c.TTL)}
+	c.m[k] = cacheEntry{res: res, exp: time.Now().Add(c.TTL)}
 	c.mu.Unlock()
-	return box, nil
+	return res, nil
+}
+
+func (c *Cached) CountryAt(ctx context.Context, p domain.Point) (string, error) {
+	// Country borders do not move: cache on a ~10 km grid.
+	k := fmt.Sprintf("@%.1f,%.1f", p.Lat, p.Lng)
+	c.mu.Lock()
+	if e, ok := c.m[k]; ok && time.Now().Before(e.exp) {
+		c.mu.Unlock()
+		return e.res.Country, nil
+	}
+	c.mu.Unlock()
+	cc, err := c.Inner.CountryAt(ctx, p)
+	if err != nil || cc == "" {
+		return cc, err
+	}
+	c.mu.Lock()
+	c.m[k] = cacheEntry{res: Result{Country: cc}, exp: time.Now().Add(c.TTL)}
+	c.mu.Unlock()
+	return cc, nil
 }
 
 // Static resolves from a fixed table; used in tests and benchmarks.
 type Static map[string]domain.BBox
 
-func (s Static) Geocode(_ context.Context, query, _, _ string) (domain.BBox, error) {
+func (s Static) Geocode(_ context.Context, query, _, _ string) (Result, error) {
 	if b, ok := s[strings.ToLower(query)]; ok {
-		return b, nil
+		return Result{BBox: b}, nil
 	}
-	return domain.BBox{}, fmt.Errorf("%w: %q", ErrNotFound, query)
+	return Result{}, fmt.Errorf("%w: %q", ErrNotFound, query)
 }
+
+func (s Static) CountryAt(context.Context, domain.Point) (string, error) { return "", nil }

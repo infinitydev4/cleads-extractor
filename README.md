@@ -51,6 +51,8 @@ curl -s "$URL/v1/jobs/$ID/export?format=csv-excel&has_phone=true" -H "Authorizat
 curl -s "$URL/v1/businesses?postal_code=69&category=plomb&has_email=true" -H "Authorization: Bearer $KEY"
 ```
 
+**International** : n'importe quel pays couvert par Google Maps, par exemple `{"query":"restaurant","location":"Dubai Marina","language":"en"}` (testé en réel). Sans `country`, le pays est déduit du lieu géocodé (recherche mondiale) ; `language` choisit la langue des catégories et des avis (`en`, `ar`, `fr`…). Les téléphones sont rendus au format international E.164 quel que soit le pays. SIRENE n'est utilisé que pour la France.
+
 Par défaut, les commerces sans rapport que Google ajoute en fin de liste sont écartés (`"include_unrelated": true` pour tout garder). Un job accepte une zone sous l'une des trois formes : `location` (géocodée), `bbox`, ou `center` + `radius_m`. `sector` (voir `GET /v1/sectors`) traduit l'activité dans la classification native de chaque source (type Google, tag OSM, code NAF) ; `query` permet une recherche libre. `GET /v1/sources` liste les sources actives sur le serveur.
 
 ### Les quatre compteurs

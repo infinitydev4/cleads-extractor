@@ -19,6 +19,10 @@ import (
 	"github.com/cleads/business-extractor/internal/taxonomy"
 )
 
+// DefaultCountry applies when the country can be neither read from the job
+// nor derived from its area.
+const DefaultCountry = "FR"
+
 // PlanTask returns the initial task of a job.
 func PlanTask(job *domain.Job) domain.Task {
 	return domain.Task{Kind: domain.TaskPlan, Source: QueuePlan, Priority: job.Spec.Priority + 10}
@@ -50,7 +54,7 @@ func (e *Engine) SelectSources(spec *domain.JobSpec) (names []string, skipped ma
 			skipped[n] = "source not enabled on this server"
 		case n == "sirene" && (sector == nil || len(sector.NAF) == 0):
 			skipped[n] = "sirene needs a sector (NAF codes); pass sector or a known activity"
-		case n == "sirene" && spec.Country != "FR":
+		case n == "sirene" && spec.Country != "FR" && spec.Country != "":
 			skipped[n] = "sirene only covers France"
 		default:
 			names = append(names, n)
@@ -81,8 +85,14 @@ func (e *Engine) execPlan(ctx context.Context, t *domain.Task) store.TaskOutcome
 			_ = e.store.FailJob(ctx, job.ID, "no geocoder configured: pass bbox or center")
 			return store.TaskOutcome{Done: true}
 		}
-		gctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		area, err = e.geocoder.Geocode(gctx, spec.Location, spec.Country, spec.Language)
+		gctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		// Without an explicit country the search is worldwide ("Dubai
+		// Marina" must not resolve to a restaurant of that name in Rennes);
+		// with one, an unknown location still gets a worldwide second try.
+		res, err := e.geocoder.Geocode(gctx, spec.Location, spec.Country, spec.Language)
+		if errors.Is(err, geocode.ErrNotFound) && spec.Country != "" {
+			res, err = e.geocoder.Geocode(gctx, spec.Location, "", spec.Language)
+		}
 		cancel()
 		if errors.Is(err, geocode.ErrNotFound) {
 			_ = e.store.FailJob(ctx, job.ID, err.Error())
@@ -91,8 +101,21 @@ func (e *Engine) execPlan(ctx context.Context, t *domain.Task) store.TaskOutcome
 		if err != nil {
 			return e.retryOrFail(t, fmt.Errorf("geocode: %w", err))
 		}
+		area = minArea(res.BBox, 1000)
+		if res.Country != "" && res.Country != spec.Country {
+			e.log.Info("job country taken from geocoding", "job", job.ID, "requested", spec.Country, "location_country", res.Country)
+			spec.Country = res.Country
+		}
 	}
 
+	if spec.Country == "" && e.geocoder != nil {
+		rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		spec.Country, _ = e.geocoder.CountryAt(rctx, area.Center())
+		cancel()
+	}
+	if spec.Country == "" {
+		spec.Country = DefaultCountry
+	}
 	names, skipped := e.SelectSources(&spec)
 	if len(names) == 0 {
 		reasons := make([]string, 0, len(skipped))
@@ -403,4 +426,14 @@ func (e *Engine) execDetails(ctx context.Context, t *domain.Task) store.TaskOutc
 		}
 	}
 	return out
+}
+
+// minArea grows boxes smaller than sideM (a geocoded shop or street instead
+// of a district) to a square of that side around their center.
+func minArea(b domain.BBox, sideM float64) domain.BBox {
+	h, w := geo.SizeKm(b)
+	if h*1000 >= sideM && w*1000 >= sideM {
+		return b
+	}
+	return geo.BBoxAround(b.Center(), sideM/2)
 }

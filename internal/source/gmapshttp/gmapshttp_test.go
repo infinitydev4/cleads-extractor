@@ -25,7 +25,7 @@ func TestParsePlaceFixture(t *testing.T) {
 	}
 	want := domain.Business{
 		Name: "Kipriakon", Category: "Restaurant", City: "Limassol", PostalCode: "3042",
-		PlaceID: "ChIJDdnwdv0y5xQRRytw1ihZQeU", CID: "16519582940102929223", Phone: "25101555",
+		PlaceID: "ChIJDdnwdv0y5xQRRytw1ihZQeU", CID: "16519582940102929223", Phone: "+35725101555",
 		ReviewsCount: 396, Rating: 4.2, Status: domain.StatusOperational,
 	}
 	if b.Name != want.Name || b.Category != want.Category || b.City != want.City || b.PostalCode != want.PostalCode ||
@@ -280,6 +280,41 @@ func TestStatusAndDescriptionFromSlot88(t *testing.T) {
 	for in, want := range cases {
 		if got := mapStatus(in[0], in[1]); got != want {
 			t.Errorf("mapStatus(%q,%q) = %q, want %q", in[0], in[1], got, want)
+		}
+	}
+}
+
+func TestParseLiveDubaiFixture(t *testing.T) {
+	raw, err := os.ReadFile("testdata/search_live_dubai.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := ParseSearch(raw)
+	if err != nil || len(items) < 10 {
+		t.Fatalf("items %d err %v", len(items), err)
+	}
+	b := items[0]
+	if b.Phone != "+971566623611" || b.Country != "AE" || b.City != "Dubai" || b.Street != "Botanica Tower" {
+		t.Fatalf("international fields: phone=%q country=%q city=%q street=%q", b.Phone, b.Country, b.City, b.Street)
+	}
+	for _, it := range items {
+		if it.Phone != "" && !strings.HasPrefix(it.Phone, "+971") {
+			t.Errorf("%s: phone %q not international", it.Name, it.Phone)
+		}
+	}
+}
+
+func TestFrenchPhonesStayInternational(t *testing.T) {
+	raw, _ := os.ReadFile("testdata/search_live.json")
+	items, _ := ParseSearch(raw)
+	for _, it := range items {
+		if it.Phone != "" && !strings.HasPrefix(it.Phone, "+33") {
+			t.Fatalf("%s: phone %q", it.Name, it.Phone)
+		}
+		// service-area businesses have no address block: the source fills
+		// the country from the request instead
+		if it.Address != "" && it.Country != "FR" {
+			t.Fatalf("%s: country %q", it.Name, it.Country)
 		}
 	}
 }

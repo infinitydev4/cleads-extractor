@@ -66,7 +66,7 @@ components:
           type: object
           properties: { lat: { type: number }, lng: { type: number } }
         radius_m: { type: number, maximum: 100000 }
-        country: { type: string, default: FR }
+        country: { type: string, description: "ISO 3166-1 alpha-2. Optional: by default the country of the geocoded location (worldwide search). Set it to disambiguate (e.g. AE)." }
         language: { type: string, default: fr }
         sources:
           type: array

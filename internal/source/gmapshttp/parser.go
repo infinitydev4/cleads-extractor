@@ -157,7 +157,7 @@ func businessFrom(idx *fields) domain.Business {
 	b := domain.Business{
 		Name:      str(11, ""),
 		Website:   actualURL(str(7, "0")),
-		Phone:     strings.ReplaceAll(str(178, "0.0"), " ", ""),
+		Phone:     phoneOf(idx.at(178).Get("0")),
 		Status:    mapStatus(str(34, "4.4"), closedMarker(str(88, "0"))),
 		PlaceID:   str(78, ""),
 		Sources:   []string{Name},
@@ -202,6 +202,14 @@ func businessFrom(idx *fields) domain.Business {
 		b.City = ca.Get("3").Str
 		b.PostalCode = ca.Get("4").Str
 		b.Region = ca.Get("5").Str
+		if cc := ca.Get("6").Str; len(cc) == 2 {
+			b.Country = strings.ToUpper(cc)
+		}
+		if b.City == "" {
+			// City-states and emirates (Dubai, Singapore, Monaco...) only
+			// fill the region slot.
+			b.City = b.Region
+		}
 	}
 
 	if dataID := idx.at(10).Str; dataID != "" {
@@ -366,6 +374,24 @@ func firstNum(rs ...gjson.Result) float64 {
 		}
 	}
 	return 0
+}
+
+// phoneOf prefers Google's own international rendering ("+971 56 662
+// 3611", entry type 2), which is correct for every country, over the local
+// display format.
+func phoneOf(p gjson.Result) string {
+	intl := ""
+	p.Get("1").ForEach(func(_, f gjson.Result) bool {
+		if f.Get("1").Int() == 2 && strings.HasPrefix(f.Get("0").Str, "+") {
+			intl = f.Get("0").Str
+			return false
+		}
+		return true
+	})
+	if intl == "" {
+		intl = p.Get("0").Str
+	}
+	return strings.ReplaceAll(intl, " ", "")
 }
 
 // parseHours reads [[day, _, _, [[ "9:00–18:00", ...], ...]], ...].

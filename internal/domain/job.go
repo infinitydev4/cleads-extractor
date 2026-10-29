@@ -71,7 +71,7 @@ type JobSpec struct {
 	BBox     *BBox   `json:"bbox,omitempty"`
 	Center   *Point  `json:"center,omitempty"`
 	RadiusM  float64 `json:"radius_m,omitempty"`
-	Country  string  `json:"country,omitempty"`  // ISO alpha-2, default FR
+	Country  string  `json:"country,omitempty"`  // ISO alpha-2; default: country of the geocoded location
 	Language string  `json:"language,omitempty"` // default fr
 
 	Sources    []string `json:"sources,omitempty"`      // default: every enabled source
@@ -91,9 +91,7 @@ func (s *JobSpec) Normalize() {
 	s.Sector = strings.ToLower(strings.TrimSpace(s.Sector))
 	s.Location = strings.TrimSpace(s.Location)
 	s.Country = strings.ToUpper(strings.TrimSpace(s.Country))
-	if s.Country == "" {
-		s.Country = "FR"
-	}
+	// An empty country is resolved by geocoding the location (worldwide).
 	s.Language = strings.ToLower(strings.TrimSpace(s.Language))
 	if s.Language == "" {
 		s.Language = "fr"
@@ -134,7 +132,7 @@ func (s *JobSpec) Validate(maxResultsCap int) error {
 	if hasArea > 1 {
 		errs = append(errs, errors.New("location, bbox and center are mutually exclusive"))
 	}
-	if len(s.Country) != 2 {
+	if s.Country != "" && len(s.Country) != 2 {
 		errs = append(errs, errors.New("country must be an ISO 3166-1 alpha-2 code"))
 	}
 	if s.GridCellKm < 0 || s.GridCellKm > 50 {

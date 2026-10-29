@@ -170,7 +170,9 @@ func (s *Source) Search(ctx context.Context, req source.Request) (source.Result,
 		if pad.Contains(domain.Point{Lat: items[i].Lat, Lng: items[i].Lng}) {
 			inCell++
 		}
-		items[i].Country = req.Country
+		if items[i].Country == "" {
+			items[i].Country = req.Country
+		}
 		kept = append(kept, items[i])
 	}
 	res := source.Result{Businesses: kept}
@@ -233,7 +235,9 @@ func (s *Source) Details(ctx context.Context, req source.DetailsRequest) (domain
 		s.dump("place", body)
 		return b, err
 	}
-	b.Country = req.Country
+	if b.Country == "" {
+		b.Country = req.Country
+	}
 	return b, nil
 }
 
