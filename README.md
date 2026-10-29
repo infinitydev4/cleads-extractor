@@ -10,7 +10,8 @@ API REST en Go pour **rechercher, extraire, normaliser, dédupliquer, enrichir e
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Analyse de gosom/google-maps-scraper, comparaison A/B, architecture retenue |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Résultats mesurés, méthode, projection de capacité |
-| [docs/RAILWAY.md](docs/RAILWAY.md) | Déploiement pas à pas, dimensionnement, exploitation |
+| [docs/DEPLOY_VPS.md](docs/DEPLOY_VPS.md) | **Production sur VPS** (Docker, HTTPS, sauvegardes) et pipeline CI/CD GitHub Actions |
+| [docs/RAILWAY.md](docs/RAILWAY.md) | Déploiement sur Railway, dimensionnement, exploitation |
 | [docs/COMPLIANCE.md](docs/COMPLIANCE.md) | Licences des sources, RGPD/CNIL, sécurité |
 | [docs/MCP.md](docs/MCP.md) | Serveur MCP pour agents LLM : outils, ressources, configuration de Claude Desktop / Claude Code |
 | `GET /docs` | Référence OpenAPI interactive (spécification : `internal/api/openapi.yaml`) |

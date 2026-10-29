@@ -1,0 +1,30 @@
+# HTTPS termination for the API. Certificates are obtained and renewed
+# automatically (Let's Encrypt, then ZeroSSL) for {$DOMAIN}; ports 80 and 443
+# must be reachable from the internet. HTTP is redirected to HTTPS.
+{
+	admin off
+}
+
+{$DOMAIN} {
+	# Streams (SSE progress, MCP, exports) must never be buffered or
+	# compressed; everything else is.
+	@compressible not path /v1/jobs/*/events /mcp /mcp/*
+	encode @compressible zstd gzip
+
+	reverse_proxy api:8080 {
+		flush_interval -1
+		transport http {
+			dial_timeout 5s
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

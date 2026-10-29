@@ -1,12 +1,35 @@
-name: ci
+name: ci-cd
+
+# test -> build image (GHCR) -> deploy to the VPS.
+#   pull request       : tests + image build (not pushed)
+#   push to main       : tests + image pushed + deployment
+#   manual (dispatch)  : redeploy an existing image tag (rollback), no rebuild
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      deploy_tag:
+        description: "Image tag to deploy without rebuilding (e.g. sha-1a2b3c4)"
+        required: true
+        type: string
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   test:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16-alpine
@@ -18,13 +41,134 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U cleads" --health-interval 2s --health-retries 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then echo "needs gofmt:"; echo "$unformatted"; exit 1; fi
       - run: go vet ./...
-      - run: go test -race -count=1 ./...
+      - name: Tests (race detector, PostgreSQL integration)
+        run: go test -race -count=1 ./...
         env:
           TEST_DATABASE_URL: postgres://cleads:cleads@localhost:5432/cleads_test?sslmode=disable
-      - run: go test -run '^$' -bench . -benchtime 200ms ./internal/...
-      - run: docker build -t cleads-extractor:ci .
+      - name: Benchmarks (smoke)
+        run: go test -run '^$' -bench . -benchtime 200ms ./internal/...
+      - name: Known vulnerabilities (informational)
+        continue-on-error: true
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  image:
+    needs: test
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: vars
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build (and push on main)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' }}
+          platforms: linux/amd64
+          provenance: false
+          build-args: VERSION=${{ steps.vars.outputs.tag }}
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.vars.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: image
+    # "image" is skipped on manual redeploys: !failure() lets skipped needs through.
+    if: >-
+      ${{ !cancelled() && !failure() &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      TAG: ${{ inputs.deploy_tag || needs.image.outputs.tag }}
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check deployment secrets
+        id: cfg
+        run: |
+          if [ -n "$VPS_HOST" ] && [ -n "$VPS_SSH_KEY" ] && [ -n "$VPS_KNOWN_HOSTS" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Deployment skipped::VPS_HOST, VPS_SSH_KEY and VPS_KNOWN_HOSTS secrets are not configured (see docs/DEPLOY_VPS.md)"
+          fi
+      - name: Prepare SSH
+        if: steps.cfg.outputs.enabled == 'true'
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host vps
+            HostName ${VPS_HOST}
+            User ${VPS_USER:-deploy}
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 15
+          EOF
+      - name: Sync deployment files
+        if: steps.cfg.outputs.enabled == 'true'
+        run: |
+          scp deploy/prod/docker-compose.yml deploy/prod/Caddyfile deploy/prod/deploy.sh \
+              deploy/prod/backup.sh deploy/prod/init-env.sh vps:/opt/cleads/
+          ssh vps 'chmod +x /opt/cleads/*.sh'
+      - name: Deploy ${{ env.TAG }}
+        if: steps.cfg.outputs.enabled == 'true'
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          # The short-lived workflow token is piped to the server for the pull
+          # and never stored there (deploy.sh logs out afterwards).
+          # shellcheck disable=SC2029  # TAG and REGISTRY_USER expand locally on purpose
+          printf '%s' "$REGISTRY_TOKEN" | ssh vps "/opt/cleads/deploy.sh '$TAG' '$REGISTRY_USER'"
+      - name: Public health check
+        if: steps.cfg.outputs.enabled == 'true'
+        run: |
+          host="$(ssh vps "sed -n 's/^DOMAIN=//p' /opt/cleads/.env")"
+          for _ in $(seq 1 20); do
+            if curl -fsS --max-time 5 "https://${host}/readyz"; then echo; exit 0; fi
+            sleep 3
+          done
+          echo "::error::https://${host}/readyz did not answer"; exit 1
