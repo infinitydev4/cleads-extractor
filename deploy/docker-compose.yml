@@ -1,0 +1,59 @@
+# Local stack mirroring the Railway topology: PostgreSQL + API + N workers
+# (+ optional Google Maps browser sidecar).
+#
+#   docker compose -f deploy/docker-compose.yml up --build --scale worker=2
+#   docker compose -f deploy/docker-compose.yml --profile gmaps up --build
+name: cleads-extractor
+
+x-common-env: &common-env
+  APP_ENV: development
+  DATABASE_URL: postgres://cleads:cleads@postgres:5432/cleads?sslmode=disable
+  LOG_FORMAT: text
+  ENRICH_ENABLED: "true"
+  GEOCODER_USER_AGENT: "CLEADS-Business-Extractor/1.0 (local dev)"
+  GOOGLE_PLACES_API_KEY: ${GOOGLE_PLACES_API_KEY:-}
+  ENABLE_GMAPS_SCRAPING: ${ENABLE_GMAPS_SCRAPING:-false}
+  GMAPS_SCRAPER_URL: ${GMAPS_SCRAPER_URL:-}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cleads
+      POSTGRES_PASSWORD: cleads
+      POSTGRES_DB: cleads
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cleads"]
+      interval: 2s
+      retries: 30
+
+  api:
+    build: { context: .., dockerfile: Dockerfile }
+    environment:
+      <<: *common-env
+      ROLE: api
+      API_KEYS: ${API_KEYS:-admin:local-dev-key-change-me-0123456789}
+    ports: ["8080:8080"]
+    depends_on: { postgres: { condition: service_healthy } }
+
+  worker:
+    build: { context: .., dockerfile: Dockerfile }
+    environment:
+      <<: *common-env
+      ROLE: worker
+    depends_on: { postgres: { condition: service_healthy } }
+
+  # Upstream gosom/google-maps-scraper in web mode, used by the
+  # google_maps_browser source (set GMAPS_SCRAPER_URL=http://gmaps:8080).
+  gmaps:
+    profiles: [gmaps]
+    image: gosom/google-maps-scraper:latest
+    command: ["-web", "-data-folder", "/gmapsdata", "-c", "2"]
+    volumes: [gmapsdata:/gmapsdata]
+    ports: ["8090:8080"]
+
+volumes:
+  pgdata:
+  gmapsdata:

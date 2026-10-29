@@ -1,0 +1,11 @@
+.git
+.github
+**/*_test.go
+docs
+deploy/docker-compose*.yml
+*.md
+!internal/**/*.md
+bin
+coverage.out
+.env
+.env.*

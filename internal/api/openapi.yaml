@@ -1,0 +1,264 @@
+openapi: 3.1.0
+info:
+  title: CLEADS Business Extractor API
+  version: "1.0.0"
+  description: |
+    Discover, extract, normalize, deduplicate, enrich and export business
+    listings by activity sector and geographic area.
+
+    **Flow**: `POST /v1/jobs` → follow `GET /v1/jobs/{id}/events` (SSE) or poll
+    `GET /v1/jobs/{id}` → read results progressively with
+    `GET /v1/jobs/{id}/businesses?cursor=…` → export with
+    `GET /v1/jobs/{id}/export?format=csv`.
+
+    **Throughput counters** are reported separately: `raw_found` (everything
+    sources returned), `unique` (after deduplication), `complete` (identity,
+    address, phone and website/email) and `crm_useful` (operating and
+    reachable by at least one channel).
+servers:
+  - url: /
+security:
+  - bearer: []
+  - apiKey: []
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer }
+    apiKey: { type: apiKey, in: header, name: X-API-Key }
+  parameters:
+    JobID: { name: id, in: path, required: true, schema: { type: string } }
+    Cursor: { name: cursor, in: query, schema: { type: string }, description: Opaque cursor returned as next_cursor. }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+    MinCompleteness: { name: min_completeness, in: query, schema: { type: integer, minimum: 0, maximum: 100 } }
+    HasPhone: { name: has_phone, in: query, schema: { type: boolean } }
+    HasEmail: { name: has_email, in: query, schema: { type: boolean } }
+    HasWebsite: { name: has_website, in: query, schema: { type: boolean } }
+    Useful: { name: useful, in: query, schema: { type: boolean }, description: Only CRM-useful records. }
+    City: { name: city, in: query, schema: { type: string } }
+    PostalCode: { name: postal_code, in: query, schema: { type: string }, description: Prefix match, e.g. "69" or "69003". }
+    Category: { name: category, in: query, schema: { type: string } }
+    Q: { name: q, in: query, schema: { type: string }, description: Name contains. }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            request_id: { type: string }
+    BBox:
+      type: object
+      required: [min_lat, min_lng, max_lat, max_lng]
+      properties:
+        min_lat: { type: number }
+        min_lng: { type: number }
+        max_lat: { type: number }
+        max_lng: { type: number }
+    JobSpec:
+      type: object
+      properties:
+        query: { type: string, example: plombier, description: Free-text activity. One of query or sector is required. }
+        sector: { type: string, example: plumber, description: Taxonomy key from GET /v1/sectors. }
+        location: { type: string, example: "Lyon, France", description: Geocoded to a bounding box. }
+        bbox: { $ref: "#/components/schemas/BBox" }
+        center:
+          type: object
+          properties: { lat: { type: number }, lng: { type: number } }
+        radius_m: { type: number, maximum: 100000 }
+        country: { type: string, default: FR }
+        language: { type: string, default: fr }
+        sources:
+          type: array
+          items: { type: string, enum: [google_places, google_maps_http, google_maps_browser, osm, sirene, mock] }
+          description: Defaults to every enabled source.
+        grid_cell_km: { type: number, description: "0 = per-source default. Cells saturating a source are split automatically." }
+        max_results: { type: integer, description: Stop once this many unique businesses are found. }
+        enrich: { type: boolean, description: Crawl websites for emails, social profiles and SIRET. }
+        webhook_url: { type: string, format: uri, description: "POSTed on completion, signed with X-Cleads-Signature: sha256=HMAC(secret, timestamp + '.' + body)." }
+        priority: { type: integer }
+    Counters:
+      type: object
+      properties:
+        tasks_total: { type: integer }
+        tasks_done: { type: integer }
+        tasks_failed: { type: integer }
+        raw_found: { type: integer }
+        unique: { type: integer }
+        complete: { type: integer }
+        crm_useful: { type: integer }
+        enriched: { type: integer }
+    Job:
+      type: object
+      properties:
+        id: { type: string }
+        spec: { $ref: "#/components/schemas/JobSpec" }
+        status: { type: string, enum: [queued, running, completed, failed, cancelled] }
+        counters: { $ref: "#/components/schemas/Counters" }
+        error: { type: string }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+    Business:
+      type: object
+      properties:
+        id: { type: integer }
+        seq: { type: integer, description: Position in the job (listing only). }
+        name: { type: string }
+        category: { type: string }
+        categories: { type: array, items: { type: string } }
+        address: { type: string }
+        street: { type: string }
+        postal_code: { type: string }
+        city: { type: string }
+        region: { type: string }
+        country: { type: string }
+        lat: { type: number }
+        lng: { type: number }
+        phone: { type: string, description: E.164 when it could be normalized. }
+        website: { type: string }
+        domain: { type: string }
+        emails: { type: array, items: { type: string } }
+        socials:
+          type: object
+          properties:
+            linkedin: { type: string }
+            facebook: { type: string }
+            instagram: { type: string }
+            x: { type: string }
+            youtube: { type: string }
+            tiktok: { type: string }
+        rating: { type: number }
+        reviews_count: { type: integer }
+        status: { type: string, enum: [OPERATIONAL, CLOSED_TEMPORARILY, CLOSED_PERMANENTLY] }
+        place_id: { type: string }
+        cid: { type: string }
+        osm_id: { type: string }
+        siren: { type: string }
+        siret: { type: string }
+        naf: { type: string }
+        sources: { type: array, items: { type: string } }
+        completeness: { type: integer, minimum: 0, maximum: 100 }
+        source_url: { type: string }
+paths:
+  /healthz:
+    get: { summary: Liveness, security: [], responses: { "200": { description: OK } } }
+  /readyz:
+    get: { summary: Readiness (database reachable), security: [], responses: { "200": { description: Ready }, "503": { description: Not ready } } }
+  /v1/sources:
+    get: { summary: Enabled sources and their operational profile, responses: { "200": { description: OK } } }
+  /v1/sectors:
+    get: { summary: Sector taxonomy (Google types, OSM tags, NAF codes), responses: { "200": { description: OK } } }
+  /v1/jobs:
+    post:
+      summary: Submit an extraction job
+      parameters:
+        - { name: Idempotency-Key, in: header, schema: { type: string }, description: Replays return the original job. }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JobSpec" }
+            example: { query: plombier, location: "Lyon, France", enrich: true, max_results: 2000 }
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: { $ref: "#/components/schemas/Job" }
+                  planned_sources: { type: array, items: { type: string } }
+                  skipped_sources: { type: object, additionalProperties: { type: string } }
+                  links: { type: object, additionalProperties: { type: string } }
+        "200": { description: Idempotent replay }
+        "400": { description: Invalid JSON, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { description: Invalid spec, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    get:
+      summary: List jobs (newest first)
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: before, in: query, schema: { type: string, format: date-time } }
+        - { $ref: "#/components/parameters/Limit" }
+      responses: { "200": { description: OK } }
+  /v1/jobs/{id}:
+    get:
+      summary: Job status and counters
+      parameters: [{ $ref: "#/components/parameters/JobID" }]
+      responses: { "200": { description: OK }, "404": { description: Not found } }
+    delete:
+      summary: Cancel a job
+      parameters: [{ $ref: "#/components/parameters/JobID" }]
+      responses: { "200": { description: Cancelled }, "409": { description: Already finished } }
+  /v1/jobs/{id}/businesses:
+    get:
+      summary: Results so far, cursor-paginated (poll with next_cursor for new records)
+      parameters:
+        - { $ref: "#/components/parameters/JobID" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/MinCompleteness" }
+        - { $ref: "#/components/parameters/HasPhone" }
+        - { $ref: "#/components/parameters/HasEmail" }
+        - { $ref: "#/components/parameters/HasWebsite" }
+        - { $ref: "#/components/parameters/Useful" }
+        - { $ref: "#/components/parameters/City" }
+        - { $ref: "#/components/parameters/PostalCode" }
+        - { $ref: "#/components/parameters/Category" }
+        - { $ref: "#/components/parameters/Q" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Business" } }
+                  next_cursor: { type: string }
+                  has_more: { type: boolean }
+                  job_status: { type: string }
+                  counters: { $ref: "#/components/schemas/Counters" }
+  /v1/jobs/{id}/events:
+    get:
+      summary: Server-Sent Events progress stream (event progress, then done)
+      parameters:
+        - { $ref: "#/components/parameters/JobID" }
+        - { name: interval_ms, in: query, schema: { type: integer, minimum: 250, maximum: 10000, default: 1000 } }
+      responses: { "200": { description: text/event-stream } }
+  /v1/jobs/{id}/export:
+    get:
+      summary: Streamed export (works while the job is running)
+      parameters:
+        - { $ref: "#/components/parameters/JobID" }
+        - { name: format, in: query, schema: { type: string, enum: [csv, csv-excel, jsonl], default: csv } }
+        - { $ref: "#/components/parameters/MinCompleteness" }
+        - { $ref: "#/components/parameters/HasPhone" }
+        - { $ref: "#/components/parameters/HasEmail" }
+        - { $ref: "#/components/parameters/Useful" }
+      responses: { "200": { description: File stream } }
+  /v1/businesses:
+    get:
+      summary: Search the consolidated prospecting base (all jobs, deduplicated)
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/MinCompleteness" }
+        - { $ref: "#/components/parameters/HasPhone" }
+        - { $ref: "#/components/parameters/HasEmail" }
+        - { $ref: "#/components/parameters/Useful" }
+        - { $ref: "#/components/parameters/City" }
+        - { $ref: "#/components/parameters/PostalCode" }
+        - { $ref: "#/components/parameters/Category" }
+        - { $ref: "#/components/parameters/Q" }
+      responses: { "200": { description: OK } }
+  /v1/businesses/{id}:
+    get:
+      summary: One business
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses: { "200": { description: OK }, "404": { description: Not found } }
+  /v1/stats:
+    get: { summary: Global counters and queue depth, responses: { "200": { description: OK } } }
+  /metrics:
+    get: { summary: Prometheus metrics, responses: { "200": { description: OK } } }
