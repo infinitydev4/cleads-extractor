@@ -78,8 +78,11 @@ type JobSpec struct {
 	GridCellKm float64  `json:"grid_cell_km,omitempty"` // 0 = auto
 	MaxResults int      `json:"max_results,omitempty"`  // 0 = unlimited (bounded by server cap)
 	Enrich     bool     `json:"enrich,omitempty"`       // crawl websites for emails/socials/SIRET
-	WebhookURL string   `json:"webhook_url,omitempty"`  // POSTed when the job ends
-	Priority   int      `json:"priority,omitempty"`     // higher runs first
+	// IncludeUnrelated keeps the unrelated nearby places that Google Maps
+	// appends to results (filtered out by default).
+	IncludeUnrelated bool   `json:"include_unrelated,omitempty"`
+	WebhookURL       string `json:"webhook_url,omitempty"` // POSTed when the job ends
+	Priority         int    `json:"priority,omitempty"`    // higher runs first
 }
 
 // Normalize applies defaults in place.
@@ -175,9 +178,10 @@ type Job struct {
 type TaskKind string
 
 const (
-	TaskPlan   TaskKind = "plan"   // geocode + split area into search tasks
-	TaskSearch TaskKind = "search" // query one source on one cell / page
-	TaskEnrich TaskKind = "enrich" // crawl one website
+	TaskPlan    TaskKind = "plan"    // geocode + split area into search tasks
+	TaskSearch  TaskKind = "search"  // query one source on one cell / page
+	TaskEnrich  TaskKind = "enrich"  // crawl one website
+	TaskDetails TaskKind = "details" // fetch the full place profile
 )
 
 type TaskStatus string
@@ -216,7 +220,11 @@ type TaskPayload struct {
 	Location   string `json:"location,omitempty"`
 	Enrich     bool   `json:"enrich,omitempty"`
 	MaxResults int    `json:"max,omitempty"`
+	All        bool   `json:"all,omitempty"`
 	// enrich
 	BusinessID int64  `json:"business_id,omitempty"`
 	Website    string `json:"website,omitempty"`
+	// details
+	DataID string `json:"data_id,omitempty"`
+	Name   string `json:"name,omitempty"`
 }

@@ -42,19 +42,74 @@ type Business struct {
 	// Identifiers coming from upstream sources, used for deduplication.
 	PlaceID string `json:"place_id,omitempty"` // Google place id (ChIJ...)
 	CID     string `json:"cid,omitempty"`      // Google customer id
+	DataID  string `json:"data_id,omitempty"`  // Google Maps feature id (0x..:0x..)
 	OSMID   string `json:"osm_id,omitempty"`   // node/123, way/456
 	SIREN   string `json:"siren,omitempty"`
 	SIRET   string `json:"siret,omitempty"`
 	NAF     string `json:"naf,omitempty"` // French activity code (APE)
 
-	Sources       []string  `json:"sources"`
-	Completeness  int       `json:"completeness"` // 0..100
-	EnrichedAt    time.Time `json:"enriched_at,omitzero"`
-	FirstSeenAt   time.Time `json:"first_seen_at,omitzero"`
-	LastSeenAt    time.Time `json:"last_seen_at,omitzero"`
-	SourceURL     string    `json:"source_url,omitempty"`
-	Raw           []byte    `json:"-"` // optional raw payload, never exported
-	EnrichPending bool      `json:"-"`
+	Sources      []string  `json:"sources"`
+	Completeness int       `json:"completeness"` // 0..100
+	EnrichedAt   time.Time `json:"enriched_at,omitzero"`
+	FirstSeenAt  time.Time `json:"first_seen_at,omitzero"`
+	LastSeenAt   time.Time `json:"last_seen_at,omitzero"`
+	SourceURL    string    `json:"source_url,omitempty"`
+	Details      *Details  `json:"details,omitempty"`
+	DetailsAt    time.Time `json:"details_at,omitzero"`
+}
+
+// Details is the full place profile (Google Maps place page).
+type Details struct {
+	Description      string                 `json:"description,omitempty"`
+	Thumbnail        string                 `json:"thumbnail,omitempty"`
+	Timezone         string                 `json:"timezone,omitempty"`
+	PlusCode         string                 `json:"plus_code,omitempty"`
+	ReviewsLink      string                 `json:"reviews_link,omitempty"`
+	Owner            *Owner                 `json:"owner,omitempty"`
+	Menu             *Link                  `json:"menu,omitempty"`
+	Reservations     []Link                 `json:"reservations,omitempty"`
+	OrderOnline      []Link                 `json:"order_online,omitempty"`
+	Images           []Link                 `json:"images,omitempty"`
+	Attributes       []AttributeGroup       `json:"attributes,omitempty"`
+	ReviewsPerRating map[int]int            `json:"reviews_per_rating,omitempty"`
+	Reviews          []Review               `json:"reviews,omitempty"`
+	PopularTimes     map[string]map[int]int `json:"popular_times,omitempty"`
+}
+
+type Owner struct {
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+	Link string `json:"link,omitempty"`
+}
+
+type Link struct {
+	Title string `json:"title,omitempty"`
+	URL   string `json:"url"`
+}
+
+// AttributeGroup is one "About" section (accessibility, payments, ...).
+type AttributeGroup struct {
+	ID      string      `json:"id,omitempty"`
+	Name    string      `json:"name"`
+	Options []Attribute `json:"options"`
+}
+
+type Attribute struct {
+	Name    string   `json:"name"`
+	Enabled bool     `json:"enabled"`
+	Values  []string `json:"values,omitempty"`
+}
+
+type Review struct {
+	ID          string    `json:"id,omitempty"`
+	Author      string    `json:"author"`
+	AuthorURL   string    `json:"author_url,omitempty"`
+	Rating      int       `json:"rating"`
+	Text        string    `json:"text,omitempty"`
+	When        string    `json:"when,omitempty"`
+	PublishedAt time.Time `json:"published_at,omitzero"`
+	Reply       string    `json:"owner_reply,omitempty"`
+	Language    string    `json:"language,omitempty"`
 }
 
 // Socials groups the social network profiles found for a business.
@@ -169,6 +224,13 @@ func (b *Business) Merge(o *Business) {
 	fill(&b.Status, o.Status)
 	fill(&b.PlaceID, o.PlaceID)
 	fill(&b.CID, o.CID)
+	fill(&b.DataID, o.DataID)
+	if o.Details != nil && (b.Details == nil || o.DetailsAt.After(b.DetailsAt)) {
+		b.Details = o.Details
+	}
+	if o.DetailsAt.After(b.DetailsAt) {
+		b.DetailsAt = o.DetailsAt
+	}
 	fill(&b.OSMID, o.OSMID)
 	fill(&b.SIREN, o.SIREN)
 	fill(&b.SIRET, o.SIRET)

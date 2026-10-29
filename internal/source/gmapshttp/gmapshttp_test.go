@@ -101,7 +101,7 @@ func TestSearchHTTP(t *testing.T) {
 	defer srv.Close()
 	s := New(Config{Endpoint: srv.URL, MaxPages: 2})
 	req := source.Request{Query: "plombier", Language: "fr", Country: "FR",
-		Cell: domain.BBox{MinLat: 45.7, MinLng: 4.8, MaxLat: 45.8, MaxLng: 4.9}}
+		Cell: domain.BBox{MinLat: 45.75, MinLng: 4.82, MaxLat: 45.79, MaxLng: 4.84}}
 	res, err := s.Search(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -181,6 +181,105 @@ func BenchmarkParseSearch20(b *testing.B) {
 	for b.Loop() {
 		if _, err := ParseSearch(payload); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+func TestParseLiveSearchFixture(t *testing.T) {
+	raw, err := os.ReadFile("testdata/search_live.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := ParseSearch(raw)
+	if err != nil || len(items) != 20 {
+		t.Fatalf("got %d items, err %v", len(items), err)
+	}
+	withPhone, withSite := 0, 0
+	for _, b := range items {
+		if b.Phone != "" {
+			withPhone++
+		}
+		if b.Website != "" {
+			withSite++
+		}
+		if b.DataID == "" || b.PlaceID == "" || b.CID == "" || b.Status != domain.StatusOperational {
+			t.Fatalf("identifiers/status missing: %+v", b)
+		}
+	}
+	if withPhone < 15 || withSite < 10 {
+		t.Fatalf("phones %d sites %d", withPhone, withSite)
+	}
+}
+
+func TestDetailsFromLiveFixture(t *testing.T) {
+	payload, err := os.ReadFile("testdata/preview_place_live.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotPB string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPB = r.URL.Query().Get("pb")
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+	s := New(Config{DetailsEndpoint: srv.URL})
+	b, err := s.Details(context.Background(), source.DetailsRequest{DataID: "0x47f4ebd905024249:0xcf3cd1724f630f1b", Name: "CHAPUIS PLOMBERIE", Language: "fr", Country: "FR"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(gotPB, "!1m15!1s0x47f4ebd905024249:0xcf3cd1724f630f1b!2sCHAPUIS PLOMBERIE!3m12") || !strings.Contains(gotPB, "!14m3!1s") {
+		t.Fatalf("pb = %.80s", gotPB)
+	}
+	d := b.Details
+	if d == nil || b.DetailsAt.IsZero() || len(b.Categories) < 5 || d.Owner == nil || len(d.Reviews) == 0 ||
+		d.ReviewsPerRating[5] != 70 || d.PlusCode == "" || d.Timezone != "Europe/Paris" || len(d.Images) == 0 {
+		t.Fatalf("details incomplete: %+v / %+v", b, d)
+	}
+	r := d.Reviews[0]
+	if r.Author == "" || r.Rating != 5 || r.Text == "" || r.PublishedAt.IsZero() {
+		t.Fatalf("review %+v", r)
+	}
+}
+
+func TestDetailsFixtureAttributes(t *testing.T) {
+	raw, _ := os.ReadFile("testdata/place_raw.json")
+	b, err := ParsePlace(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := b.Details
+	if len(d.Attributes) != 10 || len(d.Images) == 0 || len(d.PopularTimes) != 7 {
+		t.Fatalf("attrs %d images %d popular %d", len(d.Attributes), len(d.Images), len(d.PopularTimes))
+	}
+}
+
+func TestPaginationStopsWhenResultsLeaveTheCell(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(searchPayload(20)) // all results around 45.76,4.83
+	}))
+	defer srv.Close()
+	s := New(Config{Endpoint: srv.URL})
+	far := domain.BBox{MinLat: 48.80, MinLng: 2.30, MaxLat: 48.82, MaxLng: 2.33}
+	res, err := s.Search(context.Background(), source.Request{Query: "x", Cell: far})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.NextPageToken != "" || res.Saturated {
+		t.Fatal("results outside the cell must stop pagination")
+	}
+}
+
+func TestStatusAndDescriptionFromSlot88(t *testing.T) {
+	if closedMarker("Cathédrale avec trésors du XIVe siècle") != "" || closedMarker("FERMÉ") == "" || closedMarker("CLOSED") == "" {
+		t.Fatal("closedMarker")
+	}
+	cases := map[[2]string]string{
+		{"", ""}: "", {"", "FERMÉ"}: domain.StatusClosedPermanently, {"", "FERMÉ TEMPORAIREMENT"}: domain.StatusClosedTemporarily,
+		{"Temporarily closed", ""}: domain.StatusClosedTemporarily, {"Open now", ""}: domain.StatusOperational,
+	}
+	for in, want := range cases {
+		if got := mapStatus(in[0], in[1]); got != want {
+			t.Errorf("mapStatus(%q,%q) = %q, want %q", in[0], in[1], got, want)
 		}
 	}
 }

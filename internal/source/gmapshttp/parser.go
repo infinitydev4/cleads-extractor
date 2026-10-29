@@ -11,9 +11,12 @@ package gmapshttp
 
 import (
 	"bytes"
+	"fmt"
 	"math/big"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tidwall/gjson"
 
@@ -34,8 +37,18 @@ func stripXSSI(b []byte) []byte {
 	return bytes.TrimSpace(b)
 }
 
-// ParseSearch parses a /search?tbm=map response body.
-func ParseSearch(body []byte) ([]domain.Business, error) {
+// ParseSearch parses a /search?tbm=map response body. A payload that does
+// not match the expected layout yields an error, never a panic.
+func ParseSearch(body []byte) (out []domain.Business, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			out, err = nil, fmt.Errorf("%w: parser panic: %v", errInvalidPayload, r)
+		}
+	}()
+	return parseSearch(body)
+}
+
+func parseSearch(body []byte) ([]domain.Business, error) {
 	body = stripXSSI(body)
 	if !gjson.ValidBytes(body) {
 		return nil, errInvalidPayload
@@ -44,7 +57,7 @@ func ParseSearch(body []byte) ([]domain.Business, error) {
 	if !items.IsArray() {
 		// Some responses wrap the payload in a JSON string under "d".
 		if d := gjson.GetBytes(body, "d"); d.Type == gjson.String {
-			return ParseSearch([]byte(d.Str))
+			return parseSearch([]byte(d.Str))
 		}
 		return nil, errInvalidPayload
 	}
@@ -67,8 +80,18 @@ func ParseSearch(body []byte) ([]domain.Business, error) {
 	return out, nil
 }
 
-// ParsePlace parses the APP_INITIALIZATION_STATE place payload (place page).
-func ParsePlace(raw []byte) (domain.Business, error) {
+// ParsePlace parses a place payload (/maps/preview/place response or the
+// APP_INITIALIZATION_STATE place entry). Never panics.
+func ParsePlace(raw []byte) (b domain.Business, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			b, err = domain.Business{}, fmt.Errorf("%w: parser panic: %v", errInvalidPayload, r)
+		}
+	}()
+	return parsePlace(raw)
+}
+
+func parsePlace(raw []byte) (domain.Business, error) {
 	raw = stripXSSI(raw)
 	if !gjson.ValidBytes(raw) {
 		return domain.Business{}, errInvalidPayload
@@ -77,15 +100,18 @@ func ParsePlace(raw []byte) (domain.Business, error) {
 	if !biz.IsArray() {
 		return domain.Business{}, errInvalidPayload
 	}
-	b := parseBusiness(biz)
+	f := scanFields(biz)
+	b := businessFrom(f)
 	if b.CID == "" {
 		b.CID = gjson.GetBytes(raw, "25.3.0.13.0.0.1").Str
 	}
+	b.Details = parseDetails(f)
+	b.DetailsAt = time.Now().UTC()
 	return b, nil
 }
 
 // Top-level indexes of the business array that we read.
-var wanted = [...]int{2, 4, 7, 9, 10, 11, 13, 18, 27, 34, 39, 78, 88, 178, 183, 203}
+var wanted = [...]int{2, 4, 7, 9, 10, 11, 13, 18, 27, 30, 32, 34, 38, 39, 46, 57, 72, 75, 78, 84, 88, 100, 171, 175, 178, 183, 203}
 
 const maxWanted = 203
 
@@ -103,8 +129,8 @@ type fields [len(wanted)]gjson.Result
 
 func (f *fields) at(n int) gjson.Result { return f[slotOf[n]] }
 
-func parseBusiness(d gjson.Result) domain.Business {
-	// A single pass over the top-level array is cheaper than ~20 independent
+func scanFields(d gjson.Result) *fields {
+	// A single pass over the top-level array is cheaper than ~25 independent
 	// path lookups that would each rescan the payload from the start.
 	var f fields
 	i := 0
@@ -115,7 +141,12 @@ func parseBusiness(d gjson.Result) domain.Business {
 		i++
 		return i <= maxWanted
 	})
-	idx := &f
+	return &f
+}
+
+func parseBusiness(d gjson.Result) domain.Business { return businessFrom(scanFields(d)) }
+
+func businessFrom(idx *fields) domain.Business {
 	str := func(n int, path string) string {
 		if path == "" {
 			return idx.at(n).Str
@@ -127,7 +158,7 @@ func parseBusiness(d gjson.Result) domain.Business {
 		Name:      str(11, ""),
 		Website:   actualURL(str(7, "0")),
 		Phone:     strings.ReplaceAll(str(178, "0.0"), " ", ""),
-		Status:    mapStatus(str(34, "4.4"), str(88, "0")),
+		Status:    mapStatus(str(34, "4.4"), closedMarker(str(88, "0"))),
 		PlaceID:   str(78, ""),
 		Sources:   []string{Name},
 		SourceURL: str(27, ""),
@@ -183,7 +214,158 @@ func parseBusiness(d gjson.Result) domain.Business {
 	if len(b.Hours) == 0 {
 		b.Hours = parseHours(idx.at(34).Get("1"))
 	}
+	b.DataID = idx.at(10).Str
+	if b.Status == "" && b.Name != "" {
+		// No closure marker: Maps only flags closed places.
+		b.Status = domain.StatusOperational
+	}
 	return b
+}
+
+// parseDetails reads the place-page-only fields (description, attributes,
+// photos, owner, reviews, popular times...).
+func parseDetails(f *fields) *domain.Details {
+	d := &domain.Details{
+		Description: f.at(32).Get("1.1").Str,
+		Thumbnail:   f.at(72).Get("0.1.6.0").Str,
+		Timezone:    f.at(30).Str,
+		PlusCode:    f.at(183).Get("2.2.0").Str,
+		ReviewsLink: f.at(4).Get("3.0").Str,
+	}
+	if d.Description == "" && closedMarker(f.at(88).Get("0").Str) == "" {
+		d.Description = f.at(88).Get("0").Str
+	}
+	if id, name := f.at(57).Get("2").Str, f.at(57).Get("1").Str; id != "" || name != "" {
+		d.Owner = &domain.Owner{ID: id, Name: name}
+		if id != "" {
+			d.Owner.Link = "https://www.google.com/maps/contrib/" + id
+		}
+	}
+	if u := f.at(38).Get("0").Str; u != "" {
+		d.Menu = &domain.Link{URL: u, Title: f.at(38).Get("1").Str}
+	}
+	d.Reservations = links(f.at(46), "0", "1")
+	order := f.at(75).Get("0.1.2")
+	if !order.IsArray() {
+		order = f.at(75).Get("0.0.2")
+	}
+	d.OrderOnline = links(order, "1.2.0", "0.0")
+	d.Images = links(f.at(171).Get("0"), "3.0.6.0", "2")
+	if len(d.Images) == 0 {
+		// Places without a categorized gallery still expose their photo strip.
+		d.Images = links(f.at(72).Get("0"), "6.0", "")
+	}
+
+	f.at(100).Get("1").ForEach(func(_, g gjson.Result) bool {
+		grp := domain.AttributeGroup{ID: g.Get("0").Str, Name: g.Get("1").Str}
+		g.Get("2").ForEach(func(_, o gjson.Result) bool {
+			name := o.Get("1").Str
+			if name == "" {
+				return true
+			}
+			a := domain.Attribute{Name: name, Enabled: o.Get("2.1.0.0").Int() == 1}
+			o.Get("2.4.1.0.0").ForEach(func(_, v gjson.Result) bool {
+				if s := firstStr(v.Get("2"), v.Get("3")); s != "" {
+					a.Values = append(a.Values, s)
+				}
+				return true
+			})
+			grp.Options = append(grp.Options, a)
+			return true
+		})
+		if grp.Name != "" && len(grp.Options) > 0 {
+			d.Attributes = append(d.Attributes, grp)
+		}
+		return true
+	})
+
+	if rpr := f.at(175).Get("3"); rpr.IsArray() {
+		d.ReviewsPerRating = make(map[int]int, 5)
+		for i := 0; i < 5; i++ {
+			d.ReviewsPerRating[i+1] = int(rpr.Get(strconv.Itoa(i)).Int())
+		}
+	}
+	revs := f.at(175).Get("9.0.0")
+	if !revs.IsArray() {
+		revs = f.at(175).Get("9.0")
+	}
+	revs.ForEach(func(_, it gjson.Result) bool {
+		el := it.Get("0")
+		if !el.IsArray() {
+			el = it
+		}
+		r := domain.Review{
+			ID:        el.Get("0").Str,
+			Author:    firstStr(el.Get("1.4.5.0"), el.Get("1.4.4"), el.Get("0.1")),
+			AuthorURL: el.Get("1.4.2.0").Str,
+			Rating:    int(firstNum(el.Get("2.0.0"), el.Get("2.0"), el.Get("1.0.0"))),
+			Text:      firstStr(el.Get("2.15.0.0"), el.Get("2.15.0"), el.Get("3.0")),
+			When:      firstStr(el.Get("1.6"), el.Get("3.3")),
+			Language:  el.Get("2.14.0").Str,
+			Reply:     firstStr(el.Get("3.14.0.0"), el.Get("3.14.1.0")),
+		}
+		if us := el.Get("1.2").Int(); us > 1e15 {
+			r.PublishedAt = time.UnixMicro(us).UTC()
+		}
+		if r.Author != "" {
+			d.Reviews = append(d.Reviews, r)
+		}
+		return true
+	})
+
+	days := map[int64]string{1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday", 5: "Friday", 6: "Saturday", 7: "Sunday"}
+	f.at(84).Get("0").ForEach(func(_, day gjson.Result) bool {
+		name, ok := days[day.Get("0").Int()]
+		if !ok {
+			return true
+		}
+		hours := map[int]int{}
+		day.Get("1").ForEach(func(_, h gjson.Result) bool {
+			hours[int(h.Get("0").Int())] = int(h.Get("1").Int())
+			return true
+		})
+		if len(hours) > 0 {
+			if d.PopularTimes == nil {
+				d.PopularTimes = map[string]map[int]int{}
+			}
+			d.PopularTimes[name] = hours
+		}
+		return true
+	})
+	return d
+}
+
+func links(arr gjson.Result, linkPath, titlePath string) []domain.Link {
+	var out []domain.Link
+	arr.ForEach(func(_, it gjson.Result) bool {
+		if u := it.Get(linkPath).Str; u != "" {
+			l := domain.Link{URL: u}
+			if titlePath != "" {
+				l.Title = it.Get(titlePath).Str
+			}
+			out = append(out, l)
+		}
+		return true
+	})
+	return out
+}
+
+func firstStr(rs ...gjson.Result) string {
+	for _, r := range rs {
+		if r.Type == gjson.String && r.Str != "" {
+			return r.Str
+		}
+	}
+	return ""
+}
+
+func firstNum(rs ...gjson.Result) float64 {
+	for _, r := range rs {
+		if r.Type == gjson.Number && r.Num != 0 {
+			return r.Num
+		}
+	}
+	return 0
 }
 
 // parseHours reads [[day, _, _, [[ "9:00–18:00", ...], ...]], ...].
@@ -224,15 +406,25 @@ func parseHours(items gjson.Result) map[string]string {
 	return out
 }
 
+// closedMarker returns [88][0] when it is the localized closure enum
+// ("FERMÉ", "CLOSED", "GESCHLOSSEN"...): a short upper-case label. Otherwise
+// that slot holds the editorial description and is ignored here.
+func closedMarker(v string) string {
+	if v == "" || len(v) > 40 || strings.ToUpper(v) != v || strings.ToLower(v) == v {
+		return ""
+	}
+	return v
+}
+
 func mapStatus(legacy, closed string) string {
 	l := strings.ToLower(legacy + " " + closed)
 	switch {
-	case strings.Contains(l, "permanently") || strings.Contains(l, "définitivement") || closed == "CLOSED":
-		return domain.StatusClosedPermanently
-	case strings.Contains(l, "temporarily") || strings.Contains(l, "temporairement"):
-		return domain.StatusClosedTemporarily
 	case strings.TrimSpace(l) == "":
 		return ""
+	case strings.Contains(l, "tempor"):
+		return domain.StatusClosedTemporarily
+	case closed != "" || strings.Contains(l, "permanently") || strings.Contains(l, "définitivement"):
+		return domain.StatusClosedPermanently
 	}
 	return domain.StatusOperational
 }

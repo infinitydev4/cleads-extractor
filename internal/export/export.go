@@ -29,6 +29,7 @@ var Columns = []string{
 	"address", "street", "postal_code", "city", "region", "country", "lat", "lng",
 	"rating", "reviews_count", "status", "completeness", "siren", "siret", "naf",
 	"linkedin", "facebook", "instagram", "place_id", "cid", "osm_id", "sources", "source_url", "hours",
+	"description", "owner", "plus_code", "timezone", "thumbnail", "photos", "attributes", "reviews_sample", "reviews_link",
 }
 
 // New returns a writer for format "csv", "csv-excel" (semicolon + BOM, for
@@ -83,12 +84,18 @@ func (c *csvWriter) Write(b *domain.Business) error {
 		}
 		return strconv.FormatFloat(v, 'f', -1, 64)
 	}
+	coord := func(v float64) string {
+		if v == 0 {
+			return ""
+		}
+		return strconv.FormatFloat(v, 'f', 7, 64) // ~1 cm
+	}
 	r := c.row
 	r[0] = strconv.FormatInt(b.ID, 10)
 	r[1], r[2], r[3], r[4] = safe(b.Name), safe(b.Category), safe(b.Phone), safe(email)
 	r[5], r[6], r[7] = safe(strings.Join(b.Emails, " ")), safe(b.Website), safe(b.Domain)
 	r[8], r[9], r[10], r[11], r[12], r[13] = safe(b.Address), safe(b.Street), safe(b.PostalCode), safe(b.City), safe(b.Region), b.Country
-	r[14], r[15], r[16] = f(b.Lat), f(b.Lng), f(b.Rating)
+	r[14], r[15], r[16] = coord(b.Lat), coord(b.Lng), f(b.Rating)
 	r[17] = ""
 	if b.ReviewsCount > 0 {
 		r[17] = strconv.Itoa(b.ReviewsCount)
@@ -99,6 +106,22 @@ func (c *csvWriter) Write(b *domain.Business) error {
 	r[26], r[27], r[28] = b.PlaceID, b.CID, b.OSMID
 	r[29], r[30] = strings.Join(b.Sources, " "), safe(b.SourceURL)
 	r[31] = safe(hours(b.Hours))
+	for i := 32; i < len(r); i++ {
+		r[i] = ""
+	}
+	if d := b.Details; d != nil {
+		r[32] = safe(d.Description)
+		if d.Owner != nil {
+			r[33] = safe(d.Owner.Name)
+		}
+		r[34], r[35], r[36] = d.PlusCode, d.Timezone, safe(d.Thumbnail)
+		if len(d.Images) > 0 {
+			r[37] = strconv.Itoa(len(d.Images))
+		}
+		r[38] = safe(attributes(d.Attributes))
+		r[39] = safe(reviewsSample(d.Reviews, 3))
+		r[40] = safe(d.ReviewsLink)
+	}
 	return c.cw.Write(r)
 }
 
@@ -156,6 +179,48 @@ func hours(h map[string]string) string {
 		sb.WriteString(k)
 		sb.WriteString(": ")
 		sb.WriteString(h[k])
+	}
+	return sb.String()
+}
+
+// attributes flattens enabled options: "Services: Livraison, Vente à emporter | Paiements: Cartes de crédit".
+func attributes(groups []domain.AttributeGroup) string {
+	var sb strings.Builder
+	for _, g := range groups {
+		var opts []string
+		for _, o := range g.Options {
+			if o.Enabled {
+				opts = append(opts, o.Name)
+			}
+		}
+		if len(opts) == 0 {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString(" | ")
+		}
+		sb.WriteString(g.Name)
+		sb.WriteString(": ")
+		sb.WriteString(strings.Join(opts, ", "))
+	}
+	return sb.String()
+}
+
+// reviewsSample renders the first n reviews as "5★ Author: text".
+func reviewsSample(rs []domain.Review, n int) string {
+	var sb strings.Builder
+	for i, r := range rs {
+		if i == n {
+			break
+		}
+		if sb.Len() > 0 {
+			sb.WriteString(" || ")
+		}
+		text := strings.Join(strings.Fields(r.Text), " ")
+		if rr := []rune(text); len(rr) > 280 {
+			text = string(rr[:280]) + "…"
+		}
+		fmt.Fprintf(&sb, "%d★ %s: %s", r.Rating, r.Author, text)
 	}
 	return sb.String()
 }

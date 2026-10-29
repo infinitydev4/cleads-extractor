@@ -10,7 +10,7 @@ build:
 
 run:
 	APP_ENV=development AUTH_DISABLED=true LOG_FORMAT=text ENABLE_MOCK_SOURCE=true \
-	ENABLE_OSM=false ENABLE_SIRENE=false ENRICH_ENABLED=false GEOCODER=none $(GO) run ./cmd/server
+	ENABLE_GMAPS_SCRAPING=false ENABLE_OSM=false ENABLE_SIRENE=false ENRICH_ENABLED=false GEOCODER=none $(GO) run ./cmd/server
 
 test:
 	$(GO) vet ./...

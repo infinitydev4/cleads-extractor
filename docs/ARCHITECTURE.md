@@ -32,6 +32,8 @@
 
 **Pourquoi ne pas importer le code upstream comme bibliothèque** : le package `gmaps` est couplé à `scrapemate` (modèle de job, navigateur) et à `exiter`, le module embarque ~250 dépendances, et son API interne n'est pas stable. Le coût de maintenance d'un fork dépasse celui d'une réimplémentation ciblée.
 
+**Mise à jour (29/10/2026, après tests réels)** : le scraping HTTP est désormais la **source Google par défaut, sans clé API**. Il se fait en deux temps : la recherche paginée (`!8i` = offset vérifié en réel : 7 pages, 140 fiches distinctes) rend les fiches visibles immédiatement ; puis une tâche « détail » par entreprise appelle `/maps/preview/place` (l'endpoint JSON de l'application web, construit à partir du seul `data_id`) pour la fiche complète, sans page HTML ni navigateur. Les deux étapes partagent le même gouverneur de débit, puisque c'est la même IP qui interroge Google.
+
 **Ce qui est réutilisé** :
 1. *La connaissance du format* (chemins positionnels, paramètre `pb`, cookie de consentement, dérivation du CID depuis le `data_id`) réimplémentée dans `internal/source/gmapshttp` avec attribution MIT. Les fixtures upstream servent de tests de non-régression.
 2. *Le binaire upstream inchangé* comme service Railway séparé (`gosom/google-maps-scraper -web`), piloté par `internal/source/gmapsbrowser` via son API REST. Chromium n'entre jamais dans le processus API, et on bénéficie des correctifs upstream sans fork.

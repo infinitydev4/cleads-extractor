@@ -30,12 +30,14 @@ type TaskOutcome struct {
 
 // UpsertItem is the per-record result of UpsertBusinesses.
 type UpsertItem struct {
-	BusinessID  int64
-	NewInJob    bool // first time this business is attached to the job
-	Complete    bool
-	CRMUseful   bool
-	NeedsEnrich bool // has a website and was never enriched
-	Website     string
+	BusinessID   int64
+	NewInJob     bool // first time this business is attached to the job
+	Complete     bool
+	CRMUseful    bool
+	NeedsEnrich  bool // has a website and was never enriched
+	Website      string
+	NeedsDetails bool // has a Maps feature id and no place details yet
+	DataID       string
 }
 
 // BusinessFilter selects records for listings and exports.
@@ -88,7 +90,9 @@ type Store interface {
 	// maxInJob > 0, at most that many distinct businesses are ever linked to
 	// the job (atomic quota, safe across concurrent workers).
 	UpsertBusinesses(ctx context.Context, jobID string, items []domain.Business, keys [][]string, maxInJob int) ([]UpsertItem, error)
-	ApplyEnrichment(ctx context.Context, jobID string, businessID int64, patch *domain.Business) (becameComplete, becameUseful bool, err error)
+	// ApplyPatch merges a partial record (enrichment, place details) into a
+	// business and reports whether it crossed the complete / useful bars.
+	ApplyPatch(ctx context.Context, jobID string, businessID int64, patch *domain.Business) (becameComplete, becameUseful bool, err error)
 	ListJobBusinesses(ctx context.Context, jobID string, afterSeq int64, limit int, f BusinessFilter) ([]BusinessRow, error)
 	StreamJobBusinesses(ctx context.Context, jobID string, f BusinessFilter, fn func(*BusinessRow) error) error
 	SearchBusinesses(ctx context.Context, afterID int64, limit int, f BusinessFilter) ([]domain.Business, error)

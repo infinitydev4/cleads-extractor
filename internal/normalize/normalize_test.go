@@ -140,3 +140,28 @@ func BenchmarkPhone(b *testing.B) {
 		Phone("+33 (0)4 78 12 34 56", "FR")
 	}
 }
+
+func TestMatchesActivity(t *testing.T) {
+	cases := []struct {
+		query string
+		name  string
+		cats  []string
+		want  bool
+	}{
+		{"coiffeur", "Studio 21", []string{"Salon de coiffure"}, true},
+		{"plombier", "Dupont SARL", []string{"Plomberie", "Chauffagiste"}, true},
+		{"boulangerie", "Maison Pozzoli", []string{"Pâtisserie"}, false},
+		{"boulangerie pâtisserie", "Maison Pozzoli", []string{"Pâtisserie"}, true},
+		{"boulangerie", "Boulangerie du Centre", []string{"Café"}, true},
+		{"boulangerie", "Cathédrale Saint-Jean", []string{"Cathédrale", "Site historique"}, false},
+		{"dentiste", "Dr Martin", []string{"Cabinet dentaire"}, true},
+		{"agence immobilière", "Foncia", []string{"Agent immobilier"}, true},
+		{"agence immobilière", "Carrefour", []string{"Supermarché"}, false},
+		{"", "Anything", nil, true},
+	}
+	for _, c := range cases {
+		if got := MatchesActivity(ActivityStems(c.query), c.name, c.cats); got != c.want {
+			t.Errorf("%q vs %q %v = %v, want %v", c.query, c.name, c.cats, got, c.want)
+		}
+	}
+}

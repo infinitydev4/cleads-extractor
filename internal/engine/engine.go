@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -51,7 +52,12 @@ type Config struct {
 	DisableFinalize bool
 	// MinRetryAfter floors provider retry hints (default 5s).
 	MinRetryAfter time.Duration
+	// DisableDetails skips full place profiles for sources that offer them.
+	DisableDetails bool
 }
+
+// DetailsQueue is the queue name of a source's place-details tasks.
+func DetailsQueue(source string) string { return source + ".details" }
 
 func (c *Config) defaults() {
 	if c.Lease == 0 {
@@ -93,6 +99,7 @@ type Engine struct {
 	cfg      Config
 	store    store.Store
 	sources  map[string]source.Source
+	details  map[string]source.Detailer // by source name
 	govs     map[string]*ratelimit.Governor
 	geocoder geocode.Geocoder
 	crawler  *enrich.Crawler
@@ -107,7 +114,7 @@ func New(cfg Config, st store.Store, sources []source.Source, gc geocode.Geocode
 	cfg.defaults()
 	e := &Engine{
 		cfg: cfg, store: st, geocoder: gc, crawler: cr, m: m, log: log,
-		sources: map[string]source.Source{}, govs: map[string]*ratelimit.Governor{},
+		sources: map[string]source.Source{}, govs: map[string]*ratelimit.Governor{}, details: map[string]source.Detailer{},
 		cache: dedup.NewCache(cfg.DedupCacheSize),
 		hooks: newWebhooks(cfg.WebhookSecret, log),
 	}
@@ -119,6 +126,9 @@ func New(cfg Config, st store.Store, sources []source.Source, gc geocode.Geocode
 		}
 		e.sources[info.Name] = s
 		e.govs[info.Name] = ratelimit.NewGovernor(r, burst)
+		if d, ok := s.(source.Detailer); ok && !cfg.DisableDetails {
+			e.details[info.Name] = d
+		}
 	}
 	return e
 }
@@ -158,6 +168,9 @@ func (e *Engine) Run(ctx context.Context) error {
 			n = v
 		}
 		start(name, max(1, n), e.execSearch)
+		if _, ok := e.details[name]; ok {
+			start(DetailsQueue(name), max(1, n), e.execDetails)
+		}
 	}
 	if e.crawler != nil {
 		start(QueueEnrich, e.cfg.EnrichConcurrency, e.execEnrich)
@@ -243,7 +256,7 @@ func (e *Engine) runTask(ctx context.Context, t *domain.Task, fn execFn) {
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				e.log.Error("task panic", "task", t.ID, "panic", r)
+				e.log.Error("task panic", "task", t.ID, "queue", t.Source, "panic", r, "stack", string(debug.Stack()))
 				out = e.retryOrFail(t, fmt.Errorf("panic: %v", r))
 			}
 		}()

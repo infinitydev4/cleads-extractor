@@ -11,11 +11,12 @@ import (
 type Metrics struct {
 	Registry *prometheus.Registry
 
-	RecordsRaw      *prometheus.CounterVec
-	RecordsUnique   *prometheus.CounterVec
-	RecordsComplete *prometheus.CounterVec
-	RecordsUseful   *prometheus.CounterVec
-	DedupCacheHits  prometheus.Counter
+	RecordsRaw       *prometheus.CounterVec
+	RecordsUnique    *prometheus.CounterVec
+	RecordsComplete  *prometheus.CounterVec
+	RecordsUseful    *prometheus.CounterVec
+	DedupCacheHits   prometheus.Counter
+	RecordsUnrelated *prometheus.CounterVec
 
 	SourceRequests *prometheus.CounterVec
 	SourceLatency  *prometheus.HistogramVec
@@ -47,6 +48,9 @@ func New() *Metrics {
 		}, []string{"source"}),
 		RecordsUseful: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "cleads_records_crm_useful_total", Help: "Unique records usable in the CRM (contactable, operating).",
+		}, []string{"source"}),
+		RecordsUnrelated: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "cleads_records_unrelated_total", Help: "Records dropped because they do not match the searched activity.",
 		}, []string{"source"}),
 		DedupCacheHits: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "cleads_dedup_cache_hits_total", Help: "Records dropped by the in-process dedup cache before reaching the database.",
@@ -85,7 +89,7 @@ func New() *Metrics {
 			Buckets: []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 5},
 		}, []string{"route"}),
 	}
-	r.MustRegister(m.RecordsRaw, m.RecordsUnique, m.RecordsComplete, m.RecordsUseful, m.DedupCacheHits,
+	r.MustRegister(m.RecordsRaw, m.RecordsUnique, m.RecordsUnrelated, m.RecordsComplete, m.RecordsUseful, m.DedupCacheHits,
 		m.SourceRequests, m.SourceLatency, m.SourceRate, m.CircuitOpen, m.TasksInFlight, m.TasksPending,
 		m.UpsertLatency, m.Enriched, m.HTTPRequests, m.HTTPLatency)
 	return m

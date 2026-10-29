@@ -73,6 +73,7 @@ func (s *Source) Info() source.Info {
 		RatePerSec:    0.5,
 		Burst:         2,
 		Concurrency:   s.cfg.Concurrency,
+		LooseResults:  true,
 		Timeout:       s.cfg.MaxJobTime + 2*time.Minute,
 	}
 }

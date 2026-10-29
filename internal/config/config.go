@@ -50,6 +50,8 @@ type Config struct {
 	PlacesAPIKey      string
 	PlacesFieldTier   string
 	EnableGMapsHTTP   bool
+	GMapsDetails      bool
+	GMapsDebugDir     string
 	GMapsProxies      []string
 	GMapsMaxPages     int
 	GMapsScraperURL   string
@@ -94,9 +96,11 @@ func Load() (*Config, error) {
 
 		PlacesAPIKey:      os.Getenv("GOOGLE_PLACES_API_KEY"),
 		PlacesFieldTier:   env("PLACES_FIELD_TIER", "contact"),
-		EnableGMapsHTTP:   envBool("ENABLE_GMAPS_SCRAPING", false),
+		EnableGMapsHTTP:   envBool("ENABLE_GMAPS_SCRAPING", true),
+		GMapsDetails:      envBool("GMAPS_DETAILS", true),
+		GMapsDebugDir:     os.Getenv("GMAPS_DEBUG_DIR"),
 		GMapsProxies:      envList("GMAPS_PROXIES"),
-		GMapsMaxPages:     envInt("GMAPS_MAX_PAGES", 3),
+		GMapsMaxPages:     envInt("GMAPS_MAX_PAGES", 6),
 		GMapsScraperURL:   os.Getenv("GMAPS_SCRAPER_URL"),
 		GMapsScraperEmail: envBool("GMAPS_SCRAPER_EMAIL", false),
 		EnableOSM:         envBool("ENABLE_OSM", true),

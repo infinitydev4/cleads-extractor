@@ -41,6 +41,25 @@ func TestCSV(t *testing.T) {
 	}
 }
 
+func TestCSVDetails(t *testing.T) {
+	var buf bytes.Buffer
+	w, _ := New(&buf, "csv")
+	b := domain.Business{Name: "A", Lat: 45.709400599999995, Details: &domain.Details{
+		Description: "Pain au levain", Owner: &domain.Owner{Name: "A (propriétaire)"},
+		Images:     []domain.Link{{URL: "u1"}, {URL: "u2"}},
+		Attributes: []domain.AttributeGroup{{Name: "Services", Options: []domain.Attribute{{Name: "Livraison", Enabled: true}, {Name: "Sur place", Enabled: false}}}},
+		Reviews:    []domain.Review{{Author: "Jean", Rating: 5, Text: "Très   bon"}},
+	}}
+	_ = w.Write(&b)
+	_ = w.Close()
+	rows, _ := csv.NewReader(&buf).ReadAll()
+	r := rows[1]
+	if r[14] != "45.7094006" || r[32] != "Pain au levain" || r[33] != "A (propriétaire)" || r[37] != "2" ||
+		r[38] != "Services: Livraison" || r[39] != "5★ Jean: Très bon" {
+		t.Fatalf("details columns: %q", r[32:])
+	}
+}
+
 func TestExcelVariant(t *testing.T) {
 	var buf bytes.Buffer
 	w, _ := New(&buf, "csv-excel")

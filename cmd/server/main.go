@@ -78,7 +78,7 @@ func run() error {
 		return err
 	}
 	if len(sources) == 0 {
-		return errors.New("no source enabled: set GOOGLE_PLACES_API_KEY, ENABLE_OSM, ENABLE_SIRENE or ENABLE_MOCK_SOURCE")
+		return errors.New("no source enabled: set ENABLE_GMAPS_SCRAPING, GOOGLE_PLACES_API_KEY, ENABLE_OSM, ENABLE_SIRENE or ENABLE_MOCK_SOURCE")
 	}
 	var gc geocode.Geocoder
 	switch cfg.Geocoder {
@@ -96,7 +96,7 @@ func run() error {
 		Lease: cfg.Lease, PlanConcurrency: cfg.PlanConcurrency, EnrichConcurrency: cfg.EnrichConc,
 		SourceConcurrency: cfg.SourceConc, SourceRate: cfg.SourceRate, DedupCacheSize: cfg.DedupCacheSize,
 		MaxCellsPerJob: cfg.MaxCellsPerJob, DrainTimeout: cfg.ShutdownWindow - 5*time.Second,
-		WebhookSecret: cfg.WebhookSecret,
+		WebhookSecret: cfg.WebhookSecret, DisableDetails: !cfg.GMapsDetails,
 	}, st, sources, gc, crawler, m, log)
 
 	if cfg.PprofAddr != "" {
@@ -183,9 +183,11 @@ func buildSources(cfg *config.Config, log *slog.Logger) ([]source.Source, error)
 		if err != nil {
 			return nil, err
 		}
-		log.Warn("google_maps_http enabled: unofficial access, check Google's terms of service for your use case")
+		log.Info("google_maps_http enabled (default Google source, no API key)", "details", cfg.GMapsDetails,
+			"proxies", len(proxies))
 		out = append(out, gmapshttp.New(gmapshttp.Config{
-			HTTPClient: source.NewHTTPClient(15*time.Second, 32, proxies), MaxPages: cfg.GMapsMaxPages,
+			HTTPClient: source.NewHTTPClient(15*time.Second, 64, proxies), MaxPages: cfg.GMapsMaxPages,
+			DebugDir: cfg.GMapsDebugDir,
 		}))
 	}
 	if cfg.GMapsScraperURL != "" {

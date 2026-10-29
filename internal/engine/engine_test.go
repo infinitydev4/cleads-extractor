@@ -207,3 +207,78 @@ func TestSelectSources(t *testing.T) {
 		t.Fatalf("names %v skipped %v", names, skipped)
 	}
 }
+
+// detailing wraps the mock source with a Detailer that adds a description
+// and a phone, and gives every result a feature id.
+type detailing struct {
+	inner source.Source
+	calls atomic.Int32
+}
+
+func (d *detailing) Info() source.Info { i := d.inner.Info(); i.Name = "maps"; return i }
+
+func (d *detailing) Search(ctx context.Context, r source.Request) (source.Result, error) {
+	res, err := d.inner.Search(ctx, r)
+	for i := range res.Businesses {
+		res.Businesses[i].DataID = "0x1:" + res.Businesses[i].PlaceID
+		res.Businesses[i].Phone = ""
+	}
+	return res, err
+}
+
+func (d *detailing) Details(_ context.Context, r source.DetailsRequest) (domain.Business, error) {
+	d.calls.Add(1)
+	return domain.Business{Phone: "0478000000", Details: &domain.Details{Description: "desc " + r.DataID}, DetailsAt: time.Now()}, nil
+}
+
+func TestDetailsAreFetchedOncePerBusiness(t *testing.T) {
+	st := memstore.New()
+	src := &detailing{inner: mock.New(mock.Config{CellKm: 1, PhoneRatio: 0.0001})}
+	_, stop := startEngine(t, st, src)
+	defer stop()
+	j := submit(t, st, domain.JobSpec{Query: "x", BBox: &domain.BBox{MinLat: 45.74, MinLng: 4.80, MaxLat: 45.76, MaxLng: 4.83}})
+	j = waitDone(t, st, j.ID, 20*time.Second)
+	if j.Status != domain.JobCompleted || j.Counters.Unique == 0 {
+		t.Fatalf("job %+v", j)
+	}
+	if int64(src.calls.Load()) != j.Counters.Unique {
+		t.Fatalf("details calls %d, unique %d (want exactly one per business)", src.calls.Load(), j.Counters.Unique)
+	}
+	rows, _ := st.ListJobBusinesses(context.Background(), j.ID, 0, 100000, store.BusinessFilter{})
+	for _, r := range rows {
+		if r.Details == nil || r.Phone != "+33478000000" || r.DetailsAt.IsZero() {
+			t.Fatalf("details not merged: %+v", r.Business)
+		}
+	}
+	// the phone came from details: useful counter must reflect it
+	if j.Counters.CRMUseful < j.Counters.Unique*9/10 {
+		t.Fatalf("crm_useful %d of %d after details", j.Counters.CRMUseful, j.Counters.Unique)
+	}
+}
+
+type loose struct{ source.Source }
+
+func (l loose) Info() source.Info {
+	i := l.Source.Info()
+	i.Name = "loose"
+	i.LooseResults = true
+	return i
+}
+
+func TestUnrelatedResultsAreDropped(t *testing.T) {
+	area := &domain.BBox{MinLat: 45.74, MinLng: 4.80, MaxLat: 45.75, MaxLng: 4.81}
+	for _, tc := range []struct {
+		query string
+		all   bool
+		want  bool // results expected
+	}{{"plombier", false, true}, {"coiffeur", false, false}, {"coiffeur", true, true}} {
+		st := memstore.New()
+		_, stop := startEngine(t, st, loose{mock.New(mock.Config{CellKm: 5})}) // mock category: "Plombier"
+		j := submit(t, st, domain.JobSpec{Query: tc.query, BBox: area, IncludeUnrelated: tc.all})
+		j = waitDone(t, st, j.ID, 10*time.Second)
+		stop()
+		if got := j.Counters.Unique > 0; got != tc.want || j.Counters.RawFound == 0 {
+			t.Errorf("query %q all=%v: unique=%d raw=%d", tc.query, tc.all, j.Counters.Unique, j.Counters.RawFound)
+		}
+	}
+}

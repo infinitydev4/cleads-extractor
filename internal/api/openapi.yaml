@@ -70,11 +70,12 @@ components:
         language: { type: string, default: fr }
         sources:
           type: array
-          items: { type: string, enum: [google_places, google_maps_http, google_maps_browser, osm, sirene, mock] }
-          description: Defaults to every enabled source.
+          items: { type: string, enum: [google_maps_http, google_maps_browser, google_places, osm, sirene, mock] }
+          description: "Defaults to every enabled source. google_maps_http (scraping, no API key) is enabled by default."
         grid_cell_km: { type: number, description: "0 = per-source default. Cells saturating a source are split automatically." }
         max_results: { type: integer, description: Stop once this many unique businesses are found. }
         enrich: { type: boolean, description: Crawl websites for emails, social profiles and SIRET. }
+        include_unrelated: { type: boolean, description: "Keep the unrelated nearby places Google Maps appends to results (dropped by default)." }
         webhook_url: { type: string, format: uri, description: "POSTed on completion, signed with X-Cleads-Signature: sha256=HMAC(secret, timestamp + '.' + body)." }
         priority: { type: integer }
     Counters:

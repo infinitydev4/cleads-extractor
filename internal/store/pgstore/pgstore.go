@@ -707,6 +707,7 @@ func (s *Store) UpsertBusinesses(ctx context.Context, jobID string, items []doma
 			res[i] = store.UpsertItem{
 				BusinessID: e.id, NewInJob: newInJob, Complete: e.b.IsComplete(), CRMUseful: e.b.IsCRMUseful(),
 				NeedsEnrich: e.b.Website != "" && e.b.EnrichedAt.IsZero(), Website: e.b.Website,
+				NeedsDetails: e.b.DataID != "" && e.b.DetailsAt.IsZero(), DataID: e.b.DataID,
 			}
 		}
 		return nil
@@ -738,7 +739,7 @@ func businessRow(b *domain.Business) ([]any, error) {
 		len(b.Emails) > 0, b.IsCRMUseful(), int16(b.Completeness), b.Lat, b.Lng, data, enriched, first, last}, nil
 }
 
-func (s *Store) ApplyEnrichment(ctx context.Context, _ string, id int64, patch *domain.Business) (becameComplete, becameUseful bool, err error) {
+func (s *Store) ApplyPatch(ctx context.Context, _ string, id int64, patch *domain.Business) (becameComplete, becameUseful bool, err error) {
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var data []byte
 		err := tx.QueryRow(ctx, `SELECT data FROM businesses WHERE id = $1 FOR UPDATE`, id).Scan(&data)
@@ -755,9 +756,6 @@ func (s *Store) ApplyEnrichment(ctx context.Context, _ string, id int64, patch *
 		b.ID = id
 		wasC, wasU := b.IsComplete(), b.IsCRMUseful()
 		b.Merge(patch)
-		if b.EnrichedAt.IsZero() {
-			b.EnrichedAt = time.Now().UTC()
-		}
 		b.LastSeenAt = time.Now().UTC()
 		r, err := businessRow(&b)
 		if err != nil {

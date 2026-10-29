@@ -377,12 +377,13 @@ func (s *Store) UpsertBusinesses(_ context.Context, jobID string, items []domain
 		res[i] = store.UpsertItem{
 			BusinessID: id, NewInJob: !inJob, Complete: b.IsComplete(), CRMUseful: b.IsCRMUseful(),
 			NeedsEnrich: b.Website != "" && b.EnrichedAt.IsZero(), Website: b.Website,
+			NeedsDetails: b.DataID != "" && b.DetailsAt.IsZero(), DataID: b.DataID,
 		}
 	}
 	return res, nil
 }
 
-func (s *Store) ApplyEnrichment(_ context.Context, jobID string, id int64, patch *domain.Business) (bool, bool, error) {
+func (s *Store) ApplyPatch(_ context.Context, jobID string, id int64, patch *domain.Business) (bool, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.biz[id]
@@ -391,9 +392,6 @@ func (s *Store) ApplyEnrichment(_ context.Context, jobID string, id int64, patch
 	}
 	wasC, wasU := b.IsComplete(), b.IsCRMUseful()
 	b.Merge(patch)
-	if b.EnrichedAt.IsZero() {
-		b.EnrichedAt = time.Now()
-	}
 	if patch.SIRET != "" {
 		if _, exists := s.keys["siret:"+patch.SIRET]; !exists {
 			s.keys["siret:"+patch.SIRET] = id

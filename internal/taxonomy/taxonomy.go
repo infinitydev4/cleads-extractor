@@ -31,7 +31,7 @@ var sectors = []Sector{
 	{Key: "restaurant", Label: "restaurant", GoogleType: "restaurant", OSMTags: []string{"amenity=restaurant"}, NAF: []string{"56.10A"}},
 	{Key: "fast_food", Label: "restauration rapide", GoogleType: "fast_food_restaurant", OSMTags: []string{"amenity=fast_food"}, NAF: []string{"56.10C"}},
 	{Key: "cafe", Label: "café bar", GoogleType: "cafe", OSMTags: []string{"amenity=cafe", "amenity=bar"}, NAF: []string{"56.30Z"}},
-	{Key: "bakery", Label: "boulangerie", GoogleType: "bakery", OSMTags: []string{"shop=bakery"}, NAF: []string{"10.71C", "10.71D"}, Synonyms: []string{"patisserie"}},
+	{Key: "bakery", Label: "boulangerie", GoogleType: "bakery", OSMTags: []string{"shop=bakery"}, NAF: []string{"10.71C", "10.71D"}, Synonyms: []string{"patisserie", "viennoiserie"}},
 	{Key: "butcher", Label: "boucherie", GoogleType: "butcher_shop", OSMTags: []string{"shop=butcher"}, NAF: []string{"47.22Z"}},
 	{Key: "hairdresser", Label: "coiffeur", GoogleType: "hair_salon", OSMTags: []string{"shop=hairdresser"}, NAF: []string{"96.02A"}, Synonyms: []string{"salon de coiffure"}},
 	{Key: "beauty", Label: "institut de beauté", GoogleType: "beauty_salon", OSMTags: []string{"shop=beauty"}, NAF: []string{"96.02B"}, Synonyms: []string{"esthetique"}},

@@ -29,10 +29,13 @@ Générer une clé : `openssl rand -base64 32`.
    ROLE=worker
    DATABASE_URL=${{Postgres.DATABASE_URL}}
    ENRICH_ENABLED=true
-   SOURCE_CONCURRENCY=google_places=16,osm=2,sirene=4
-   SOURCE_RATE=google_places=8
+   # scraping Google Maps actif par défaut (8 req/s, 24 simultanées par worker)
+   GMAPS_PROXIES=http://user:pass@proxy1:port,http://user:pass@proxy2:port   # recommandé depuis Railway
+   SOURCE_RATE=google_maps_http=8
    ```
 4. *Settings → Replicas* pour scaler horizontalement. Les débits `SOURCE_RATE` sont **par worker** : divisez le budget fournisseur par le nombre de réplicas.
+
+> **Scraping depuis Railway** : les mesures du benchmark ont été faites depuis une IP résidentielle. Les IP de sortie Railway sont des IP de datacenter, partagées et souvent plus surveillées par Google. Commencez à `SOURCE_RATE=google_maps_http=4` sans proxy, surveillez `cleads_source_requests_total{outcome=~"blocked|rate_limited"}` et `cleads_source_circuit_open`, puis montez ou ajoutez des proxies résidentiels.
 
 > Petit volume : un seul service avec `ROLE=all` suffit.
 

@@ -2,9 +2,9 @@
 
 API REST en Go pour **rechercher, extraire, normaliser, dédupliquer, enrichir et exporter** des fiches d'entreprises par secteur d'activité et zone géographique, avec des résultats disponibles **pendant** l'extraction.
 
-- **Sources** : Google Places API (officielle), OpenStreetMap, SIRENE (registre public français) et, en option, Google Maps en HTTP ou via un sidecar navigateur [`gosom/google-maps-scraper`](https://github.com/gosom/google-maps-scraper).
+- **Sources** : **scraping Google Maps par défaut, sans clé API** (recherche + fiche complète en HTTP, sans navigateur : catégories, horaires, téléphone, site, note, avis, photos, attributs, propriétaire, affluence), OpenStreetMap, SIRENE (registre public français), et en option Google Places API ou un sidecar navigateur [`gosom/google-maps-scraper`](https://github.com/gosom/google-maps-scraper).
 - **Moteur** : file PostgreSQL (`SKIP LOCKED`) partagée par N workers, pools par source avec débit adaptatif et disjoncteur, quadrillage adaptatif (quadtree) des zones, déduplication inter-sources par résolution d'entités.
-- **Mesuré** : API à ~25 000 req/s (p99 3 ms), 51 Mo de RSS ; plafond moteur ~2 400 fiches uniques/s sur PostgreSQL local. Voir [docs/BENCHMARKS.md](docs/BENCHMARKS.md) : rien n'est promis sans mesure.
+- **Mesuré en réel sur Google** : 350 fiches complètes/min à la cadence par défaut (8 req/s), jusqu'à ~1 000/min à 20 req/s, 0 blocage, < 100 Mo de RAM ; API à ~25 000 req/s (p99 3 ms). Voir [docs/BENCHMARKS.md](docs/BENCHMARKS.md) : rien n'est promis sans mesure.
 
 | Document | Contenu |
 |---|---|
@@ -34,9 +34,9 @@ make up                # docker compose : postgres + api + 2 workers
 ```bash
 KEY=...   # la clé elle-même, c.-à-d. la partie après « admin: » dans API_KEYS
 
-# 1. lancer un job
+# 1. lancer un job (scraping Google Maps + OSM + SIRENE par défaut)
 curl -s -X POST "$URL/v1/jobs" -H "Authorization: Bearer $KEY" -H "Idempotency-Key: crm-123" \
-  -d '{"sector":"plumber","location":"Lyon, France","enrich":true,"max_results":2000}'
+  -d '{"query":"plombier","location":"Lyon, France","enrich":true,"max_results":2000}'
 
 # 2. suivre la progression (Server-Sent Events)
 curl -N "$URL/v1/jobs/$ID/events" -H "Authorization: Bearer $KEY"
@@ -51,7 +51,7 @@ curl -s "$URL/v1/jobs/$ID/export?format=csv-excel&has_phone=true" -H "Authorizat
 curl -s "$URL/v1/businesses?postal_code=69&category=plomb&has_email=true" -H "Authorization: Bearer $KEY"
 ```
 
-Un job accepte une zone sous l'une des trois formes : `location` (géocodée), `bbox`, ou `center` + `radius_m`. `sector` (voir `GET /v1/sectors`) traduit l'activité dans la classification native de chaque source (type Google, tag OSM, code NAF) ; `query` permet une recherche libre. `GET /v1/sources` liste les sources actives sur le serveur.
+Par défaut, les commerces sans rapport que Google ajoute en fin de liste sont écartés (`"include_unrelated": true` pour tout garder). Un job accepte une zone sous l'une des trois formes : `location` (géocodée), `bbox`, ou `center` + `radius_m`. `sector` (voir `GET /v1/sectors`) traduit l'activité dans la classification native de chaque source (type Google, tag OSM, code NAF) ; `query` permet une recherche libre. `GET /v1/sources` liste les sources actives sur le serveur.
 
 ### Les quatre compteurs
 Chaque job expose `raw_found` (tout ce que les sources ont renvoyé), `unique` (après dédup), `complete` (identité, adresse, téléphone et site ou email) et `crm_useful` (en activité et joignable par au moins un canal). Les mêmes séries existent dans `/metrics`, par source.

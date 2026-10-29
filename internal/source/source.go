@@ -74,12 +74,30 @@ type Info struct {
 	MinCellKm float64 `json:"min_cell_km"`
 	// Timeout bounds one Search call (default 90s).
 	Timeout time.Duration `json:"-"`
+	// LooseResults: the provider pads results with unrelated nearby places;
+	// the engine filters them by activity unless the job opts out.
+	LooseResults bool `json:"loose_results"`
 }
 
 // Source is implemented by every provider.
 type Source interface {
 	Info() Info
 	Search(ctx context.Context, req Request) (Result, error)
+}
+
+// Detailer is implemented by sources that can fetch a full profile for a
+// record they returned (e.g. a Google Maps place page). The engine runs
+// details as separate tasks so search results stay available immediately.
+type Detailer interface {
+	Details(ctx context.Context, req DetailsRequest) (domain.Business, error)
+}
+
+// DetailsRequest identifies the record to complete.
+type DetailsRequest struct {
+	DataID   string
+	Name     string
+	Language string
+	Country  string
 }
 
 // Error classes understood by the engine.

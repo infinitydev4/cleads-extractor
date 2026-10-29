@@ -125,6 +125,7 @@ func (e *Engine) execPlan(ctx context.Context, t *domain.Task) store.TaskOutcome
 				Payload: domain.TaskPayload{
 					Query: spec.Query, Sector: sectorKey, Cell: &c, Language: spec.Language,
 					Country: spec.Country, Location: spec.Location, Enrich: spec.Enrich, MaxResults: spec.MaxResults,
+					All: spec.IncludeUnrelated,
 				},
 			})
 		}
@@ -223,6 +224,7 @@ func (e *Engine) sourceError(t *domain.Task, gov *ratelimit.Governor, err error)
 		return store.TaskOutcome{RetryAt: time.Now().Add(after), Err: err.Error()}
 	}
 	e.m.SourceRequests.WithLabelValues(t.Source, "error").Inc()
+	e.log.Warn("source error (will retry)", "source", t.Source, "task", t.ID, "attempt", t.Attempts, "err", err)
 	return e.retryOrFail(t, err)
 }
 
@@ -236,12 +238,25 @@ func (e *Engine) persist(ctx context.Context, t *domain.Task, items []domain.Bus
 		return out, nil
 	}
 	scope := t.JobID + "|" + t.Source
+	var stems []string
+	if src, ok := e.sources[t.Source]; ok && src.Info().LooseResults && !t.Payload.All {
+		texts := []string{t.Payload.Query}
+		if sec := taxonomy.Get(t.Payload.Sector); sec != nil {
+			texts = append(texts, sec.Label)
+			texts = append(texts, sec.Synonyms...)
+		}
+		stems = normalize.ActivityStems(texts...)
+	}
 	kept := items[:0]
 	keys := make([][]string, 0, len(items))
 	for i := range items {
 		b := &items[i]
 		normalize.Business(b, country)
 		if b.Name == "" {
+			continue
+		}
+		if !normalize.MatchesActivity(stems, b.Name, b.Categories) {
+			e.m.RecordsUnrelated.WithLabelValues(t.Source).Inc()
 			continue
 		}
 		ks := dedup.Keys(b)
@@ -283,6 +298,16 @@ func (e *Engine) persist(ctx context.Context, t *domain.Task, items []domain.Bus
 			out.Delta.CRMUseful++
 			e.m.RecordsUseful.WithLabelValues(t.Source).Inc()
 		}
+		if _, ok := e.details[t.Source]; ok && r.NeedsDetails {
+			// Enrichment, if requested, runs after details (which may reveal
+			// the website).
+			out.NewTasks = append(out.NewTasks, domain.Task{
+				Kind: domain.TaskDetails, Source: DetailsQueue(t.Source), Priority: t.Priority,
+				Payload: domain.TaskPayload{BusinessID: r.BusinessID, DataID: r.DataID, Name: kept[i].Name,
+					Country: kept[i].Country, Language: t.Payload.Language, Enrich: t.Payload.Enrich},
+			})
+			continue
+		}
 		if t.Payload.Enrich && r.NeedsEnrich && e.crawler != nil {
 			out.NewTasks = append(out.NewTasks, domain.Task{
 				Kind: domain.TaskEnrich, Source: QueueEnrich, Priority: t.Priority - 1,
@@ -300,12 +325,12 @@ func (e *Engine) execEnrich(ctx context.Context, t *domain.Task) store.TaskOutco
 		e.m.Enriched.WithLabelValues("error").Inc()
 		// Mark as attempted so the business is not re-crawled by every job.
 		patch := domain.Business{EnrichedAt: time.Now().UTC()}
-		_, _, _ = e.store.ApplyEnrichment(ctx, t.JobID, p.BusinessID, &patch)
+		_, _, _ = e.store.ApplyPatch(ctx, t.JobID, p.BusinessID, &patch)
 		return store.TaskOutcome{Done: true}
 	}
 	patch := res.Patch
 	normalize.Business(&patch, p.Country)
-	becameC, becameU, err := e.store.ApplyEnrichment(ctx, t.JobID, p.BusinessID, &patch)
+	becameC, becameU, err := e.store.ApplyPatch(ctx, t.JobID, p.BusinessID, &patch)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return store.TaskOutcome{Done: true}
@@ -322,6 +347,60 @@ func (e *Engine) execEnrich(ctx context.Context, t *domain.Task) store.TaskOutco
 	if becameU {
 		out.Delta.CRMUseful = 1
 		e.m.RecordsUseful.WithLabelValues(QueueEnrich).Inc()
+	}
+	return out
+}
+
+func (e *Engine) execDetails(ctx context.Context, t *domain.Task) store.TaskOutcome {
+	srcName := strings.TrimSuffix(t.Source, ".details")
+	d, ok := e.details[srcName]
+	if !ok {
+		return store.TaskOutcome{Err: "details not available for " + srcName}
+	}
+	gov := e.govs[srcName]
+	if err := gov.Wait(ctx); err != nil {
+		var open *ratelimit.OpenError
+		if errors.As(err, &open) {
+			return store.TaskOutcome{RetryAt: open.Until, Err: err.Error(), KeepAttempt: true}
+		}
+		return store.TaskOutcome{RetryAt: time.Now(), Err: err.Error(), KeepAttempt: true}
+	}
+	p := t.Payload
+	dctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	start := time.Now()
+	patch, err := d.Details(dctx, source.DetailsRequest{DataID: p.DataID, Name: p.Name, Language: p.Language, Country: p.Country})
+	cancel()
+	e.m.SourceLatency.WithLabelValues(t.Source).Observe(time.Since(start).Seconds())
+	if err != nil {
+		out := e.sourceError(t, gov, err)
+		return out
+	}
+	gov.OnSuccess()
+	e.m.SourceRequests.WithLabelValues(t.Source, "ok").Inc()
+	normalize.Business(&patch, p.Country)
+	becameC, becameU, err := e.store.ApplyPatch(ctx, t.JobID, p.BusinessID, &patch)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return store.TaskOutcome{Done: true}
+		}
+		return e.retryOrFail(t, err)
+	}
+	out := store.TaskOutcome{Done: true}
+	if becameC {
+		out.Delta.Complete = 1
+		e.m.RecordsComplete.WithLabelValues(t.Source).Inc()
+	}
+	if becameU {
+		out.Delta.CRMUseful = 1
+		e.m.RecordsUseful.WithLabelValues(t.Source).Inc()
+	}
+	if p.Enrich && e.crawler != nil {
+		if b, err := e.store.GetBusiness(ctx, p.BusinessID); err == nil && b.Website != "" && b.EnrichedAt.IsZero() {
+			out.NewTasks = append(out.NewTasks, domain.Task{
+				Kind: domain.TaskEnrich, Source: QueueEnrich, Priority: t.Priority - 1,
+				Payload: domain.TaskPayload{BusinessID: p.BusinessID, Website: b.Website, Country: p.Country},
+			})
+		}
 	}
 	return out
 }
