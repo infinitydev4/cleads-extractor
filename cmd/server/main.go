@@ -23,6 +23,7 @@ import (
 	"github.com/cleads/business-extractor/internal/engine"
 	"github.com/cleads/business-extractor/internal/enrich"
 	"github.com/cleads/business-extractor/internal/geocode"
+	"github.com/cleads/business-extractor/internal/mcpserver"
 	"github.com/cleads/business-extractor/internal/metrics"
 	"github.com/cleads/business-extractor/internal/obs"
 	"github.com/cleads/business-extractor/internal/source"
@@ -40,6 +41,18 @@ import (
 var version = "dev"
 
 func main() {
+	// "cleads-extractor mcp": stdio MCP server driving a remote instance
+	// through CLEADS_URL / CLEADS_API_KEY (same image, no database).
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		err := mcpserver.RunStdio(ctx, version, os.Getenv, nil, os.Stderr)
+		stop()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "fatal:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "fatal:", err)
 		os.Exit(1)

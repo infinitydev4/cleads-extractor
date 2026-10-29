@@ -6,6 +6,7 @@ TEST_DSN  ?= postgres://cleads:cleads@localhost:5432/cleads?sslmode=disable
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o bin/cleads-extractor ./cmd/server
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o bin/cleads-mcp ./cmd/mcp
 	$(GO) build -o bin/bench ./cmd/bench
 
 run:
