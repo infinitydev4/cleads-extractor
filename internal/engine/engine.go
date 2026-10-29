@@ -14,7 +14,9 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"runtime/debug"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cleads/business-extractor/internal/dedup"
@@ -54,6 +56,12 @@ type Config struct {
 	MinRetryAfter time.Duration
 	// DisableDetails skips full place profiles for sources that offer them.
 	DisableDetails bool
+	// WorkerID, Role and Version identify this process in its heartbeat
+	// (table workers), published every StatusEvery (default 10s).
+	WorkerID    string
+	Role        string
+	Version     string
+	StatusEvery time.Duration
 }
 
 // DetailsQueue is the queue name of a source's place-details tasks.
@@ -93,6 +101,12 @@ func (c *Config) defaults() {
 	if c.FinalizeEvery == 0 {
 		c.FinalizeEvery = 2 * time.Second
 	}
+	if c.StatusEvery == 0 {
+		c.StatusEvery = 10 * time.Second
+	}
+	if c.Role == "" {
+		c.Role = "worker"
+	}
 }
 
 type Engine struct {
@@ -107,6 +121,9 @@ type Engine struct {
 	m        *metrics.Metrics
 	log      *slog.Logger
 	hooks    *webhooks
+	window   *outcomeWindow
+	inflight map[string]*atomic.Int64 // by queue
+	started  time.Time                // immutable after New
 }
 
 func New(cfg Config, st store.Store, sources []source.Source, gc geocode.Geocoder, cr *enrich.Crawler,
@@ -115,8 +132,12 @@ func New(cfg Config, st store.Store, sources []source.Source, gc geocode.Geocode
 	e := &Engine{
 		cfg: cfg, store: st, geocoder: gc, crawler: cr, m: m, log: log,
 		sources: map[string]source.Source{}, govs: map[string]*ratelimit.Governor{}, details: map[string]source.Detailer{},
-		cache: dedup.NewCache(cfg.DedupCacheSize),
-		hooks: newWebhooks(cfg.WebhookSecret, log),
+		cache:  dedup.NewCache(cfg.DedupCacheSize),
+		hooks:  newWebhooks(cfg.WebhookSecret, log),
+		window: newOutcomeWindow(), inflight: map[string]*atomic.Int64{}, started: time.Now().UTC(),
+	}
+	for _, q := range []string{QueuePlan, QueueEnrich} {
+		e.inflight[q] = &atomic.Int64{}
 	}
 	for _, s := range sources {
 		info := s.Info()
@@ -126,8 +147,10 @@ func New(cfg Config, st store.Store, sources []source.Source, gc geocode.Geocode
 		}
 		e.sources[info.Name] = s
 		e.govs[info.Name] = ratelimit.NewGovernor(r, burst)
+		e.inflight[info.Name] = &atomic.Int64{}
 		if d, ok := s.(source.Detailer); ok && !cfg.DisableDetails {
 			e.details[info.Name] = d
+			e.inflight[DetailsQueue(info.Name)] = &atomic.Int64{}
 		}
 	}
 	return e
@@ -182,7 +205,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() { defer wg.Done(); e.gaugeLoop(ctx) }()
 
-	e.log.Info("engine started", "sources", len(e.sources), "enrich", e.crawler != nil)
+	e.log.Info("engine started", "sources", len(e.sources), "enrich", e.crawler != nil, "worker", e.cfg.WorkerID)
 	<-ctx.Done()
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
@@ -204,6 +227,7 @@ func (e *Engine) runPool(ctx, work context.Context, queue string, concurrency in
 	defer wg.Wait()
 	backoff := e.cfg.PollMin
 	gauge := e.m.TasksInFlight.WithLabelValues(queue)
+	inflight := e.inflight[queue]
 	for ctx.Err() == nil {
 		free := concurrency - len(sem)
 		if free <= 0 {
@@ -232,10 +256,12 @@ func (e *Engine) runPool(ctx, work context.Context, queue string, concurrency in
 			t := tasks[i]
 			sem <- struct{}{}
 			gauge.Inc()
+			inflight.Add(1)
 			wg.Add(1)
 			go func() {
 				defer func() {
 					gauge.Dec()
+					inflight.Add(-1)
 					<-sem
 					select {
 					case freed <- struct{}{}:
@@ -256,7 +282,7 @@ func (e *Engine) runTask(ctx context.Context, t *domain.Task, fn execFn) {
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				e.log.Error("task panic", "task", t.ID, "queue", t.Source, "panic", r, "stack", string(debug.Stack()))
+				e.log.Error("task panic", "job", t.JobID, "task", t.ID, "queue", t.Source, "panic", r, "stack", string(debug.Stack()))
 				out = e.retryOrFail(t, fmt.Errorf("panic: %v", r))
 			}
 		}()
@@ -270,7 +296,14 @@ func (e *Engine) runTask(ctx context.Context, t *domain.Task, fn execFn) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
 	if err := e.store.CompleteTask(cctx, t, out); err != nil && !errors.Is(err, store.ErrConflict) {
-		e.log.Error("complete task failed", "task", t.ID, "err", err)
+		e.log.Error("complete task failed", "job", t.JobID, "task", t.ID, "source", t.Source, "err", err)
+		return
+	}
+	if !out.Done && out.RetryAt.IsZero() {
+		// Final failure: the task stays in the table (status failed) and this
+		// event lets the API explain it, whichever worker ran it.
+		e.log.Warn("task failed", "job", t.JobID, "task", t.ID, "source", t.Source, "kind", t.Kind,
+			"attempts", t.Attempts, "err", out.Err)
 	}
 }
 
@@ -315,7 +348,11 @@ func (e *Engine) finalizeLoop(ctx context.Context) {
 				continue
 			}
 			for _, j := range jobs {
-				e.log.Info("job finished", "job", j.ID, "status", j.Status, "unique", j.Counters.Unique,
+				lvl := slog.LevelInfo
+				if j.Status == domain.JobFailed {
+					lvl = slog.LevelWarn
+				}
+				e.log.Log(ctx, lvl, "job finished", "error", j.Error, "job", j.ID, "status", j.Status, "unique", j.Counters.Unique,
 					"raw", j.Counters.RawFound, "complete", j.Counters.Complete, "crm_useful", j.Counters.CRMUseful)
 				if j.Spec.WebhookURL != "" {
 					e.hooks.send(j)
@@ -326,7 +363,7 @@ func (e *Engine) finalizeLoop(ctx context.Context) {
 }
 
 func (e *Engine) gaugeLoop(ctx context.Context) {
-	t := time.NewTicker(10 * time.Second)
+	t := time.NewTicker(e.cfg.StatusEvery)
 	defer t.Stop()
 	for {
 		for name, g := range e.govs {
@@ -342,12 +379,48 @@ func (e *Engine) gaugeLoop(ctx context.Context) {
 				e.m.TasksPending.WithLabelValues(src).Set(float64(n))
 			}
 		}
+		if e.cfg.WorkerID != "" {
+			if err := e.store.PutWorkerStatus(ctx, e.Status()); err != nil && ctx.Err() == nil {
+				e.log.Warn("publish worker status failed", "err", err)
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
 	}
+}
+
+// recordOutcome counts a source request in Prometheus and in the recent
+// window published for the health summary.
+func (e *Engine) recordOutcome(queue, outcome string) {
+	e.m.SourceRequests.WithLabelValues(queue, outcome).Inc()
+	e.window.add(governorName(queue), outcome, time.Now())
+}
+
+// Status is this worker's heartbeat: live governor and breaker state and
+// recent request outcomes per source.
+func (e *Engine) Status() domain.WorkerStatus {
+	now := time.Now().UTC()
+	names := make([]string, 0, len(e.govs))
+	for n := range e.govs {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	w := domain.WorkerStatus{ID: e.cfg.WorkerID, Role: e.cfg.Role, Version: e.cfg.Version, StartedAt: e.started, SeenAt: now}
+	for _, n := range names {
+		g := e.govs[n]
+		st := domain.SourceStatus{Name: n, Rate: g.Rate(), BaseRate: g.BaseRate(), CircuitOpenUntil: g.OpenUntil(),
+			Recent: e.window.sum(n, now), WindowSeconds: windowMinutes * 60}
+		for _, q := range []string{n, DetailsQueue(n)} {
+			if c := e.inflight[q]; c != nil {
+				st.InFlight += c.Load()
+			}
+		}
+		w.Sources = append(w.Sources, st)
+	}
+	return w
 }
 
 func sleep(ctx context.Context, d time.Duration) {

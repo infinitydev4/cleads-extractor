@@ -30,6 +30,9 @@ type Metrics struct {
 
 	HTTPRequests *prometheus.CounterVec
 	HTTPLatency  *prometheus.HistogramVec
+
+	LogEvents *prometheus.CounterVec
+	MCPCalls  *prometheus.CounterVec
 }
 
 func New() *Metrics {
@@ -88,8 +91,14 @@ func New() *Metrics {
 			Name: "cleads_http_request_seconds", Help: "API latency.",
 			Buckets: []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 5},
 		}, []string{"route"}),
+		LogEvents: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "cleads_log_events_total", Help: "Warnings and errors copied to the events table, by outcome (stored, dropped, failed).",
+		}, []string{"outcome"}),
+		MCPCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "cleads_mcp_tool_calls_total", Help: "MCP tool calls by tool and outcome (ok, error).",
+		}, []string{"tool", "outcome"}),
 	}
-	r.MustRegister(m.RecordsRaw, m.RecordsUnique, m.RecordsUnrelated, m.RecordsComplete, m.RecordsUseful, m.DedupCacheHits,
+	r.MustRegister(m.LogEvents, m.MCPCalls, m.RecordsRaw, m.RecordsUnique, m.RecordsUnrelated, m.RecordsComplete, m.RecordsUseful, m.DedupCacheHits,
 		m.SourceRequests, m.SourceLatency, m.SourceRate, m.CircuitOpen, m.TasksInFlight, m.TasksPending,
 		m.UpsertLatency, m.Enriched, m.HTTPRequests, m.HTTPLatency)
 	return m

@@ -192,7 +192,7 @@ func (e *Engine) execSearch(ctx context.Context, t *domain.Task) store.TaskOutco
 		return e.sourceError(t, gov, err)
 	}
 	gov.OnSuccess()
-	e.m.SourceRequests.WithLabelValues(t.Source, "ok").Inc()
+	e.recordOutcome(t.Source, "ok")
 
 	out, err := e.persist(ctx, t, res.Businesses, p.Country)
 	if err != nil {
@@ -224,13 +224,13 @@ func (e *Engine) execSearch(ctx context.Context, t *domain.Task) store.TaskOutco
 func (e *Engine) sourceError(t *domain.Task, gov *ratelimit.Governor, err error) store.TaskOutcome {
 	switch {
 	case errors.Is(err, source.ErrPermanent):
-		e.m.SourceRequests.WithLabelValues(t.Source, "permanent").Inc()
-		e.log.Warn("source permanent error", "source", t.Source, "task", t.ID, "err", err)
+		e.recordOutcome(t.Source, "permanent")
+		e.log.Warn("source permanent error", "job", t.JobID, "source", t.Source, "task", t.ID, "kind", t.Kind, "err", err)
 		return store.TaskOutcome{Err: err.Error()}
 	case errors.Is(err, source.ErrBlocked):
-		e.m.SourceRequests.WithLabelValues(t.Source, "blocked").Inc()
+		e.recordOutcome(t.Source, "blocked")
 		until := gov.OnBlocked()
-		e.log.Warn("source blocked: circuit open", "source", t.Source, "until", until, "err", err)
+		e.log.Warn("source blocked: circuit open", "job", t.JobID, "source", t.Source, "task", t.ID, "until", until, "err", err)
 		// Provider-side throttling gets a larger, but bounded, retry budget:
 		// a provider that never recovers must not keep a job alive forever.
 		if t.Attempts >= e.cfg.MaxAttempts*3 {
@@ -238,16 +238,18 @@ func (e *Engine) sourceError(t *domain.Task, gov *ratelimit.Governor, err error)
 		}
 		return store.TaskOutcome{RetryAt: until, Err: err.Error()}
 	case errors.Is(err, source.ErrRateLimited):
-		e.m.SourceRequests.WithLabelValues(t.Source, "rate_limited").Inc()
+		e.recordOutcome(t.Source, "rate_limited")
 		gov.OnRateLimited()
+		e.log.Warn("source rate limited", "job", t.JobID, "source", t.Source, "task", t.ID, "rate", gov.Rate(), "err", err)
 		if t.Attempts >= e.cfg.MaxAttempts*3 {
 			return store.TaskOutcome{Err: err.Error()}
 		}
 		after := max(source.RetryAfter(err), e.cfg.MinRetryAfter)
 		return store.TaskOutcome{RetryAt: time.Now().Add(after), Err: err.Error()}
 	}
-	e.m.SourceRequests.WithLabelValues(t.Source, "error").Inc()
-	e.log.Warn("source error (will retry)", "source", t.Source, "task", t.ID, "attempt", t.Attempts, "err", err)
+	e.recordOutcome(t.Source, "error")
+	e.log.Warn("source error (will retry)", "job", t.JobID, "source", t.Source, "task", t.ID, "kind", t.Kind,
+		"attempt", t.Attempts, "err", err)
 	return e.retryOrFail(t, err)
 }
 
@@ -399,7 +401,7 @@ func (e *Engine) execDetails(ctx context.Context, t *domain.Task) store.TaskOutc
 		return out
 	}
 	gov.OnSuccess()
-	e.m.SourceRequests.WithLabelValues(t.Source, "ok").Inc()
+	e.recordOutcome(t.Source, "ok")
 	normalize.Business(&patch, p.Country)
 	becameC, becameU, err := e.store.ApplyPatch(ctx, t.JobID, p.BusinessID, &patch)
 	if err != nil {

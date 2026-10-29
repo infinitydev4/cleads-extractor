@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -45,6 +46,21 @@ type Config struct {
 	WebhookSecret  string
 	PprofAddr      string
 	ShutdownWindow time.Duration
+
+	// observability
+	WorkerID        string
+	EventsRetention time.Duration
+	EventsBuffer    int
+	LogRingSize     int
+	// Secrets lists raw secret values (API keys, DSN password, proxy
+	// credentials...) masked in logs and diagnostics. Never logged.
+	Secrets []string
+
+	// MCP
+	MCPEnabled        bool
+	MCPAllowedOrigins []string
+	MCPMaxWait        time.Duration
+	PublicURL         string
 
 	// sources
 	PlacesAPIKey      string
@@ -94,6 +110,16 @@ func Load() (*Config, error) {
 		PprofAddr:      os.Getenv("PPROF_ADDR"),
 		ShutdownWindow: envDuration("SHUTDOWN_WINDOW", 25*time.Second),
 
+		WorkerID:        env("WORKER_ID", defaultWorkerID()),
+		EventsRetention: envDuration("EVENTS_RETENTION", 7*24*time.Hour),
+		EventsBuffer:    envInt("EVENTS_BUFFER", 4096),
+		LogRingSize:     envInt("LOG_RING_SIZE", 1000),
+
+		MCPEnabled:        envBool("MCP_ENABLED", true),
+		MCPAllowedOrigins: envList("MCP_ALLOWED_ORIGINS"),
+		MCPMaxWait:        envDuration("MCP_MAX_WAIT", 120*time.Second),
+		PublicURL:         strings.TrimRight(os.Getenv("PUBLIC_URL"), "/"),
+
 		PlacesAPIKey:      os.Getenv("GOOGLE_PLACES_API_KEY"),
 		PlacesFieldTier:   env("PLACES_FIELD_TIER", "contact"),
 		EnableGMapsHTTP:   envBool("ENABLE_GMAPS_SCRAPING", true),
@@ -136,7 +162,10 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("API_KEYS: key %q is too short (min 24 chars)", id)
 		}
 		c.APIKeys = append(c.APIKeys, APIKey{ID: id, Hash: sha256.Sum256([]byte(key))})
+		c.Secrets = append(c.Secrets, key)
 	}
+	c.Secrets = append(c.Secrets, c.WebhookSecret, c.PlacesAPIKey)
+	c.Secrets = append(c.Secrets, urlPasswords(append([]string{c.DatabaseURL}, c.GMapsProxies...))...)
 	if c.Geocoder == "" {
 		c.Geocoder = "nominatim"
 		if c.PlacesAPIKey != "" {
@@ -165,6 +194,9 @@ func (c *Config) validate() error {
 	if c.Geocoder != "google" && c.Geocoder != "nominatim" && c.Geocoder != "none" {
 		errs = append(errs, fmt.Errorf("GEOCODER must be google, nominatim or none"))
 	}
+	if c.PublicURL != "" && !strings.HasPrefix(c.PublicURL, "https://") && !strings.HasPrefix(c.PublicURL, "http://") {
+		errs = append(errs, errors.New("PUBLIC_URL must be an http(s) URL"))
+	}
 	if c.Geocoder == "google" && c.PlacesAPIKey == "" {
 		errs = append(errs, errors.New("GEOCODER=google requires GOOGLE_PLACES_API_KEY"))
 	}
@@ -187,6 +219,29 @@ func (c *Config) Redacted() map[string]any {
 		"places_api": c.PlacesAPIKey != "", "gmaps_http": c.EnableGMapsHTTP, "gmaps_browser": c.GMapsScraperURL != "",
 		"osm": c.EnableOSM, "sirene": c.EnableSirene, "mock": c.EnableMock, "geocoder": c.Geocoder, "enrich": c.EnrichEnabled,
 	}
+}
+
+// defaultWorkerID names this process in logs and heartbeats: the Railway
+// replica id when available, else host and pid.
+func defaultWorkerID() string {
+	if v := os.Getenv("RAILWAY_REPLICA_ID"); v != "" {
+		return v
+	}
+	h, _ := os.Hostname()
+	return h + "-" + strconv.Itoa(os.Getpid())
+}
+
+// urlPasswords returns the userinfo passwords of the given URLs.
+func urlPasswords(raw []string) []string {
+	var out []string
+	for _, r := range raw {
+		if u, err := url.Parse(r); err == nil && u.User != nil {
+			if p, ok := u.User.Password(); ok {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
 }
 
 func env(k, def string) string {

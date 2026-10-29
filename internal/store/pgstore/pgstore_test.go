@@ -37,7 +37,7 @@ func open(t testing.TB) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.pool.Exec(context.Background(), `TRUNCATE jobs, tasks, businesses, business_keys, job_businesses RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := s.pool.Exec(context.Background(), `TRUNCATE jobs, tasks, businesses, business_keys, job_businesses, events, workers RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)

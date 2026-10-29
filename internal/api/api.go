@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -21,11 +22,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/time/rate"
 
+	"github.com/cleads/business-extractor/internal/backend"
 	"github.com/cleads/business-extractor/internal/config"
 	"github.com/cleads/business-extractor/internal/domain"
 	"github.com/cleads/business-extractor/internal/engine"
 	"github.com/cleads/business-extractor/internal/export"
 	"github.com/cleads/business-extractor/internal/metrics"
+	"github.com/cleads/business-extractor/internal/obs"
 	"github.com/cleads/business-extractor/internal/store"
 	"github.com/cleads/business-extractor/internal/taxonomy"
 )
@@ -43,12 +46,18 @@ type Server struct {
 	log    *slog.Logger
 	limits keyLimiters
 	ver    string
+	redact *obs.Redactor
+	ring   *obs.Ring // recent logs of this process, nil when disabled
 }
 
 func New(cfg *config.Config, st store.Store, eng *engine.Engine, m *metrics.Metrics, log *slog.Logger, version string) *Server {
 	return &Server{cfg: cfg, store: st, eng: eng, m: m, log: log, ver: version,
-		limits: keyLimiters{m: map[string]*rate.Limiter{}, rate: cfg.RatePerKey}}
+		limits: keyLimiters{m: map[string]*rate.Limiter{}, rate: cfg.RatePerKey},
+		redact: obs.NewRedactor(cfg.Secrets...)}
 }
+
+// SetLogRing exposes this process's recent logs through GET /v1/logs?local=true.
+func (s *Server) SetLogRing(r *obs.Ring) { s.ring = r }
 
 // Handler returns the root handler with middleware applied.
 func (s *Server) Handler() http.Handler {
@@ -72,6 +81,10 @@ func (s *Server) Handler() http.Handler {
 	priv.HandleFunc("GET /v1/businesses", s.searchBusinesses)
 	priv.HandleFunc("GET /v1/businesses/{id}", s.getBusiness)
 	priv.HandleFunc("GET /v1/stats", s.stats)
+	priv.HandleFunc("GET /v1/jobs/{id}/tasks", s.jobTasks)
+	priv.HandleFunc("GET /v1/jobs/{id}/errors", s.jobErrors)
+	priv.HandleFunc("GET /v1/logs", s.logs)
+	priv.HandleFunc("GET /v1/health/summary", s.healthSummary)
 	priv.Handle("GET /metrics", promhttp.HandlerFor(s.m.Registry, promhttp.HandlerOpts{}))
 
 	root := http.NewServeMux()
@@ -101,6 +114,23 @@ func writeError(w http.ResponseWriter, r *http.Request, code int, kind, msg stri
 	var e apiError
 	e.Error.Code, e.Error.Message, e.Error.RequestID = kind, msg, requestID(r)
 	writeJSON(w, code, e)
+}
+
+// fail writes a backend error (or any error) as a JSON error response.
+func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
+	var (
+		be *backend.Error
+		ns *noSourceError
+	)
+	switch {
+	case errors.As(err, &ns):
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error": map[string]string{"code": "no_source", "message": "no enabled source can serve this request"}, "skipped_sources": ns.skipped})
+	case errors.As(err, &be):
+		writeError(w, r, be.Status, be.Code, be.Message)
+	default:
+		s.storeError(w, r, err)
+	}
 }
 
 func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
@@ -143,21 +173,6 @@ func filterFrom(r *http.Request) store.BusinessFilter {
 		Category:        strings.TrimSpace(q.Get("category")),
 		Query:           strings.TrimSpace(q.Get("q")),
 	}
-}
-
-// loadJob fetches a job and enforces tenant isolation: a key only sees its
-// own jobs, except the "admin" key.
-func (s *Server) loadJob(w http.ResponseWriter, r *http.Request) (domain.Job, bool) {
-	j, err := s.store.GetJob(r.Context(), r.PathValue("id"))
-	if err != nil {
-		s.storeError(w, r, err)
-		return j, false
-	}
-	if k := keyID(r); k != "" && k != adminKeyID && j.APIKeyID != k {
-		writeError(w, r, http.StatusNotFound, "not_found", "resource not found")
-		return j, false
-	}
-	return j, true
 }
 
 func newJobID(apiKey, idem string) string {
@@ -208,8 +223,9 @@ func (s *Server) docs(w http.ResponseWriter, _ *http.Request) {
 
 // ---------------------------------------------------------------- catalog
 
-func (s *Server) listSources(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"sources": s.eng.Sources()})
+func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
+	src, _ := s.Backend(keyID(r)).Sources(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{"sources": src})
 }
 
 func (s *Server) listSectors(w http.ResponseWriter, _ *http.Request) {
@@ -218,18 +234,12 @@ func (s *Server) listSectors(w http.ResponseWriter, _ *http.Request) {
 
 // ---------------------------------------------------------------- jobs
 
-type createJobResponse struct {
-	Job            domain.Job        `json:"job"`
-	PlannedSources []string          `json:"planned_sources"`
-	SkippedSources map[string]string `json:"skipped_sources,omitempty"`
-	Links          map[string]string `json:"links"`
-}
-
 func jobLinks(id string) map[string]string {
 	base := "/v1/jobs/" + id
 	return map[string]string{
 		"self": base, "businesses": base + "/businesses", "events": base + "/events",
 		"export_csv": base + "/export?format=csv", "export_jsonl": base + "/export?format=jsonl",
+		"tasks": base + "/tasks", "errors": base + "/errors",
 	}
 }
 
@@ -241,47 +251,17 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	spec.Normalize()
-	if err := spec.Validate(s.cfg.MaxResultsCap); err != nil {
-		writeError(w, r, http.StatusUnprocessableEntity, "invalid_spec", err.Error())
-		return
-	}
-	if spec.Sector != "" && taxonomy.Get(spec.Sector) == nil {
-		writeError(w, r, http.StatusUnprocessableEntity, "invalid_spec", "unknown sector (see GET /v1/sectors)")
-		return
-	}
-	for _, n := range spec.Sources {
-		if !s.eng.HasSource(n) {
-			writeError(w, r, http.StatusUnprocessableEntity, "invalid_spec", fmt.Sprintf("source %q is not enabled (see GET /v1/sources)", n))
-			return
-		}
-	}
-	planned, skipped := s.eng.SelectSources(&spec)
-	if len(planned) == 0 {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
-			"error": map[string]string{"code": "no_source", "message": "no enabled source can serve this request"}, "skipped_sources": skipped})
-		return
-	}
-	job := domain.Job{
-		ID: newJobID(keyID(r), r.Header.Get("Idempotency-Key")), Spec: spec, Status: domain.JobQueued,
-		CreatedAt: time.Now().UTC(), APIKeyID: keyID(r),
-	}
-	err := s.store.CreateJob(r.Context(), &job, []domain.Task{engine.PlanTask(&job)})
-	if errors.Is(err, store.ErrConflict) && r.Header.Get("Idempotency-Key") != "" {
-		existing, gerr := s.store.GetJob(r.Context(), job.ID)
-		if gerr != nil {
-			s.storeError(w, r, gerr)
-			return
-		}
-		writeJSON(w, http.StatusOK, createJobResponse{Job: existing, PlannedSources: planned, SkippedSources: skipped, Links: jobLinks(existing.ID)})
-		return
-	}
+	res, err := s.Backend(keyID(r)).CreateJob(r.Context(), spec, r.Header.Get("Idempotency-Key"))
 	if err != nil {
-		s.storeError(w, r, err)
+		s.fail(w, r, err)
 		return
 	}
-	w.Header().Set("Location", "/v1/jobs/"+job.ID)
-	writeJSON(w, http.StatusAccepted, createJobResponse{Job: job, PlannedSources: planned, SkippedSources: skipped, Links: jobLinks(job.ID)})
+	if res.Replayed {
+		writeJSON(w, http.StatusOK, res)
+		return
+	}
+	w.Header().Set("Location", "/v1/jobs/"+res.Job.ID)
+	writeJSON(w, http.StatusAccepted, res)
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
@@ -294,78 +274,49 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		before = t
 	}
-	limit := qInt(r, "limit", 50, 1, 200)
-	jobs, err := s.store.ListJobs(r.Context(), r.URL.Query().Get("status"), limit*4, before)
+	res, err := s.Backend(keyID(r)).ListJobs(r.Context(), r.URL.Query().Get("status"), qInt(r, "limit", 50, 1, 200), before)
 	if err != nil {
-		s.storeError(w, r, err)
+		s.fail(w, r, err)
 		return
 	}
-	k := keyID(r)
-	out := make([]domain.Job, 0, limit)
-	for _, j := range jobs {
-		if k == "" || k == adminKeyID || j.APIKeyID == k {
-			out = append(out, j)
-		}
-		if len(out) == limit {
-			break
-		}
-	}
-	resp := map[string]any{"jobs": out}
-	if len(out) == limit {
-		resp["next_before"] = out[len(out)-1].CreatedAt.Format(time.RFC3339Nano)
-	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
-	j, ok := s.loadJob(w, r)
-	if !ok {
+	j, err := s.Backend(keyID(r)).GetJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"job": j, "links": jobLinks(j.ID)})
 }
 
 func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
-	j, ok := s.loadJob(w, r)
-	if !ok {
+	j, err := s.Backend(keyID(r)).CancelJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
 		return
 	}
-	if err := s.store.CancelJob(r.Context(), j.ID); err != nil {
-		s.storeError(w, r, err)
-		return
-	}
-	j, _ = s.store.GetJob(r.Context(), j.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"job": j})
 }
 
 // jobBusinesses returns results progressively with a stable cursor: clients
 // poll with ?cursor=<next_cursor> and receive only new records.
 func (s *Server) jobBusinesses(w http.ResponseWriter, r *http.Request) {
-	j, ok := s.loadJob(w, r)
-	if !ok {
-		return
-	}
 	cursor, _ := strconv.ParseInt(r.URL.Query().Get("cursor"), 10, 64)
-	limit := qInt(r, "limit", 100, 1, 1000)
-	rows, err := s.store.ListJobBusinesses(r.Context(), j.ID, cursor, limit, filterFrom(r))
+	page, err := s.Backend(keyID(r)).JobBusinesses(r.Context(), r.PathValue("id"), cursor, qInt(r, "limit", 100, 1, 1000), filterFrom(r))
 	if err != nil {
-		s.storeError(w, r, err)
+		s.fail(w, r, err)
 		return
 	}
-	next := cursor
-	if len(rows) > 0 {
-		next = rows[len(rows)-1].Seq
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"items": rows, "next_cursor": strconv.FormatInt(next, 10), "has_more": len(rows) == limit,
-		"job_status": j.Status, "counters": j.Counters,
-	})
+	writeJSON(w, http.StatusOK, page)
 }
 
 // jobEvents streams progress as Server-Sent Events until the job ends.
 func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request) {
-	j, ok := s.loadJob(w, r)
-	if !ok {
+	j, err := s.Backend(keyID(r)).GetJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
 		return
 	}
 	rc := http.NewResponseController(w)
@@ -415,12 +366,32 @@ func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// jobExport streams the whole export. With ?limit=N it returns one bounded
+// chunk instead (X-Next-Cursor / X-Export-Done headers), the CSV header
+// being included only when cursor is 0.
 func (s *Server) jobExport(w http.ResponseWriter, r *http.Request) {
-	j, ok := s.loadJob(w, r)
-	if !ok {
+	be := s.Backend(keyID(r))
+	format := r.URL.Query().Get("format")
+	if r.URL.Query().Has("limit") {
+		cursor, _ := strconv.ParseInt(r.URL.Query().Get("cursor"), 10, 64)
+		ch, err := be.ExportChunk(r.Context(), r.PathValue("id"), format, filterFrom(r), cursor,
+			qInt(r, "limit", 100, 1, 1000), qInt(r, "max_bytes", 1<<20, 1024, 1<<20))
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		w.Header().Set("Content-Type", ch.ContentType)
+		w.Header().Set("X-Next-Cursor", ch.NextCursor)
+		w.Header().Set("X-Export-Rows", strconv.Itoa(ch.Rows))
+		w.Header().Set("X-Export-Done", strconv.FormatBool(ch.Done))
+		_, _ = io.WriteString(w, ch.Text)
 		return
 	}
-	format := r.URL.Query().Get("format")
+	j, err := be.GetJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	ew, err := export.New(w, format)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "invalid_param", err.Error())
@@ -452,21 +423,74 @@ func (s *Server) jobExport(w http.ResponseWriter, r *http.Request) {
 	_ = ew.Close()
 }
 
+func (s *Server) jobTasks(w http.ResponseWriter, r *http.Request) {
+	res, err := s.Backend(keyID(r)).JobTasks(r.Context(), r.PathValue("id"), domain.TaskStatus(r.URL.Query().Get("status")),
+		qInt(r, "limit", 100, 1, 500))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) jobErrors(w http.ResponseWriter, r *http.Request) {
+	res, err := s.Backend(keyID(r)).JobErrors(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// ---------------------------------------------------------------- diagnostics
+
+func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	lq := backend.LogQuery{Level: q.Get("level"), JobID: q.Get("job_id"), Source: q.Get("source"),
+		Limit: qInt(r, "limit", 100, 1, 500), Local: qBool(r, "local")}
+	if v := q.Get("since"); v != "" {
+		t, err := parseSince(v)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid_param", "since must be RFC3339 or a duration such as 15m")
+			return
+		}
+		lq.Since = t
+	}
+	res, err := s.Backend(keyID(r)).Logs(r.Context(), lq)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// parseSince accepts an RFC 3339 time or a duration back from now ("15m").
+func parseSince(v string) (time.Time, error) {
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return time.Now().Add(-d), nil
+	}
+	return time.Parse(time.RFC3339Nano, v)
+}
+
+func (s *Server) healthSummary(w http.ResponseWriter, r *http.Request) {
+	res, err := s.Backend(keyID(r)).Health(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 // ---------------------------------------------------------------- businesses
 
 func (s *Server) searchBusinesses(w http.ResponseWriter, r *http.Request) {
 	cursor, _ := strconv.ParseInt(r.URL.Query().Get("cursor"), 10, 64)
-	limit := qInt(r, "limit", 100, 1, 1000)
-	items, err := s.store.SearchBusinesses(r.Context(), cursor, limit, filterFrom(r))
+	page, err := s.Backend(keyID(r)).SearchBusinesses(r.Context(), cursor, qInt(r, "limit", 100, 1, 1000), filterFrom(r))
 	if err != nil {
-		s.storeError(w, r, err)
+		s.fail(w, r, err)
 		return
 	}
-	next := cursor
-	if len(items) > 0 {
-		next = items[len(items)-1].ID
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": strconv.FormatInt(next, 10), "has_more": len(items) == limit})
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) getBusiness(w http.ResponseWriter, r *http.Request) {
@@ -475,18 +499,18 @@ func (s *Server) getBusiness(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "invalid_param", "id must be an integer")
 		return
 	}
-	b, err := s.store.GetBusiness(r.Context(), id)
+	b, err := s.Backend(keyID(r)).GetBusiness(r.Context(), id)
 	if err != nil {
-		s.storeError(w, r, err)
+		s.fail(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, b)
 }
 
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
-	st, err := s.store.Stats(r.Context())
+	st, err := s.Backend(keyID(r)).Stats(r.Context())
 	if err != nil {
-		s.storeError(w, r, err)
+		s.fail(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, st)

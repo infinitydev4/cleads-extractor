@@ -947,3 +947,166 @@ func (s *Store) Stats(ctx context.Context) (store.Stats, error) {
 	}
 	return st, rows.Err()
 }
+
+// ---------------------------------------------------------------- diagnostics
+
+func (s *Store) ListTasks(ctx context.Context, jobID string, status domain.TaskStatus, limit int) ([]domain.Task, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id, job_id, kind, source, payload, priority, attempts, status, run_after, last_error
+		FROM tasks WHERE job_id = $1 AND ($2 = '' OR status = $2)
+		ORDER BY (status = 'failed') DESC, id LIMIT $3`, jobID, string(status), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Task
+	for rows.Next() {
+		var (
+			t            domain.Task
+			kind, status string
+			payload      []byte
+		)
+		if err := rows.Scan(&t.ID, &t.JobID, &kind, &t.Source, &payload, &t.Priority, &t.Attempts, &status, &t.RunAfter, &t.LastError); err != nil {
+			return nil, err
+		}
+		t.Kind, t.Status = domain.TaskKind(kind), domain.TaskStatus(status)
+		if err := json.Unmarshal(payload, &t.Payload); err != nil {
+			return nil, fmt.Errorf("decode task payload: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) InsertEvents(ctx context.Context, events []domain.LogEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+	rows := make([][]any, len(events))
+	for i := range events {
+		e := &events[i]
+		attrs := []byte("{}")
+		if len(e.Attrs) > 0 {
+			b, err := json.Marshal(e.Attrs)
+			if err != nil {
+				return fmt.Errorf("encode event attrs: %w", err)
+			}
+			attrs = b
+		}
+		var task *int64
+		if e.TaskID != 0 {
+			task = &e.TaskID
+		}
+		rows[i] = []any{e.Time, e.Level, e.Msg, e.JobID, task, e.Source, e.Worker, attrs}
+	}
+	_, err := s.pool.CopyFrom(ctx, pgx.Identifier{"events"},
+		[]string{"ts", "level", "msg", "job_id", "task_id", "source", "worker", "attrs"}, pgx.CopyFromRows(rows))
+	return err
+}
+
+func (s *Store) ListEvents(ctx context.Context, f store.EventFilter) ([]domain.LogEvent, error) {
+	limit := f.Limit
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	var (
+		sb   strings.Builder
+		args []any
+	)
+	add := func(cond string, v any) {
+		args = append(args, v)
+		sb.WriteString(" AND ")
+		sb.WriteString(strings.ReplaceAll(cond, "?", "$"+strconv.Itoa(len(args))))
+	}
+	if len(f.Levels) > 0 {
+		add("level = ANY(?)", f.Levels)
+	}
+	if f.JobID != "" {
+		add("job_id = ?", f.JobID)
+	}
+	if p, ok := strings.CutSuffix(f.Source, "*"); ok {
+		add("source LIKE ?", escapeLike(p)+"%")
+	} else if f.Source != "" {
+		add("source = ?", f.Source)
+	}
+	if !f.Since.IsZero() {
+		add("ts >= ?", f.Since)
+	}
+	if f.BeforeID > 0 {
+		add("id < ?", f.BeforeID)
+	}
+	args = append(args, limit)
+	rows, err := s.pool.Query(ctx, `SELECT id, ts, level, msg, job_id, COALESCE(task_id, 0), source, worker, attrs
+		FROM events WHERE true`+sb.String()+` ORDER BY id DESC LIMIT $`+strconv.Itoa(len(args)), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.LogEvent
+	for rows.Next() {
+		var (
+			e     domain.LogEvent
+			attrs []byte
+		)
+		if err := rows.Scan(&e.ID, &e.Time, &e.Level, &e.Msg, &e.JobID, &e.TaskID, &e.Source, &e.Worker, &attrs); err != nil {
+			return nil, err
+		}
+		if len(attrs) > 2 {
+			if err := json.Unmarshal(attrs, &e.Attrs); err != nil {
+				return nil, fmt.Errorf("decode event attrs: %w", err)
+			}
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) PurgeEvents(ctx context.Context, before time.Time) (int64, error) {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM events WHERE ts < $1`, before)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM workers WHERE seen_at < $1`, before); err != nil {
+		return tag.RowsAffected(), err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *Store) PutWorkerStatus(ctx context.Context, w domain.WorkerStatus) error {
+	src, err := json.Marshal(w.Sources)
+	if err != nil {
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `INSERT INTO workers (id, role, version, started_at, seen_at, sources)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role, version = EXCLUDED.version,
+			started_at = EXCLUDED.started_at, seen_at = EXCLUDED.seen_at, sources = EXCLUDED.sources`,
+		w.ID, w.Role, w.Version, w.StartedAt, w.SeenAt, src)
+	return err
+}
+
+func (s *Store) ListWorkerStatus(ctx context.Context, seenAfter time.Time) ([]domain.WorkerStatus, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id, role, version, started_at, seen_at, sources FROM workers
+		WHERE seen_at > $1 ORDER BY id`, seenAfter)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.WorkerStatus
+	for rows.Next() {
+		var (
+			w   domain.WorkerStatus
+			src []byte
+		)
+		if err := rows.Scan(&w.ID, &w.Role, &w.Version, &w.StartedAt, &w.SeenAt, &src); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(src, &w.Sources); err != nil {
+			return nil, fmt.Errorf("decode worker sources: %w", err)
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}

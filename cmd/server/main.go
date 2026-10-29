@@ -24,6 +24,7 @@ import (
 	"github.com/cleads/business-extractor/internal/enrich"
 	"github.com/cleads/business-extractor/internal/geocode"
 	"github.com/cleads/business-extractor/internal/metrics"
+	"github.com/cleads/business-extractor/internal/obs"
 	"github.com/cleads/business-extractor/internal/source"
 	"github.com/cleads/business-extractor/internal/source/gmapsbrowser"
 	"github.com/cleads/business-extractor/internal/source/gmapshttp"
@@ -50,7 +51,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	log := newLogger(cfg)
+	m := metrics.New()
+	var lvl slog.Level
+	_ = lvl.UnmarshalText([]byte(cfg.LogLevel))
+	// Warnings and errors are also copied to the events table (readable by
+	// any API replica); the copy is asynchronous and drops under pressure.
+	log, tee := obs.NewLogger(os.Stdout, cfg.LogFormat, lvl, obs.TeeOptions{
+		Worker: cfg.WorkerID, Buffer: cfg.EventsBuffer, Retention: cfg.EventsRetention, RingSize: cfg.LogRingSize,
+		Redactor: obs.NewRedactor(cfg.Secrets...), Events: m.LogEvents,
+	})
 	slog.SetDefault(log)
 	if lim := applyMemoryLimit(); lim > 0 {
 		log.Info("memory limit set from cgroup", "gomemlimit_mb", lim>>20)
@@ -72,6 +81,10 @@ func run() error {
 		st = memstore.New()
 	}
 	defer st.Close()
+	teeCtx, stopTee := context.WithCancel(context.Background())
+	teeDone := make(chan struct{})
+	go func() { tee.Run(teeCtx, st); close(teeDone) }()
+	defer func() { stopTee(); <-teeDone }() // flush before the store closes
 
 	sources, err := buildSources(cfg, log)
 	if err != nil {
@@ -91,12 +104,12 @@ func run() error {
 	if cfg.EnrichEnabled {
 		crawler = enrich.New(enrich.Config{MaxPages: cfg.EnrichMaxPages})
 	}
-	m := metrics.New()
 	eng := engine.New(engine.Config{
 		Lease: cfg.Lease, PlanConcurrency: cfg.PlanConcurrency, EnrichConcurrency: cfg.EnrichConc,
 		SourceConcurrency: cfg.SourceConc, SourceRate: cfg.SourceRate, DedupCacheSize: cfg.DedupCacheSize,
 		MaxCellsPerJob: cfg.MaxCellsPerJob, DrainTimeout: cfg.ShutdownWindow - 5*time.Second,
 		WebhookSecret: cfg.WebhookSecret, DisableDetails: !cfg.GMapsDetails,
+		WorkerID: cfg.WorkerID, Role: string(cfg.Role), Version: version,
 	}, st, sources, gc, crawler, m, log)
 
 	if cfg.PprofAddr != "" {
@@ -122,7 +135,9 @@ func run() error {
 
 	// Workers also listen on PORT so Railway health checks and Prometheus
 	// scraping work for every role.
-	handler := api.New(cfg, st, eng, m, log, version).Handler()
+	apiSrv := api.New(cfg, st, eng, m, log, version)
+	apiSrv.SetLogRing(tee.Ring())
+	handler := apiSrv.Handler()
 	if cfg.Role == config.RoleWorker {
 		handler = workerHandler(handler)
 	}
@@ -207,16 +222,6 @@ func buildSources(cfg *config.Config, log *slog.Logger) ([]source.Source, error)
 		out = append(out, mock.New(mock.Config{Latency: 50 * time.Millisecond}))
 	}
 	return out, nil
-}
-
-func newLogger(cfg *config.Config) *slog.Logger {
-	var lvl slog.Level
-	_ = lvl.UnmarshalText([]byte(cfg.LogLevel))
-	opts := &slog.HandlerOptions{Level: lvl}
-	if strings.EqualFold(cfg.LogFormat, "text") {
-		return slog.New(slog.NewTextHandler(os.Stdout, opts))
-	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, opts))
 }
 
 // applyMemoryLimit sets GOMEMLIMIT to 90% of the container memory limit when

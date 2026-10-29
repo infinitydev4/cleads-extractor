@@ -97,3 +97,6 @@ func (g *Governor) Rate() float64 { return float64(g.lim.Limit()) }
 type OpenError struct{ Until time.Time }
 
 func (e *OpenError) Error() string { return "circuit open until " + e.Until.Format(time.RFC3339) }
+
+// BaseRate returns the configured rate the governor recovers towards.
+func (g *Governor) BaseRate() float64 { return g.base }

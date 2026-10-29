@@ -6,6 +6,8 @@ package store
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/cleads/business-extractor/internal/domain"
@@ -101,4 +103,50 @@ type Store interface {
 	Stats(ctx context.Context) (Stats, error)
 	Ping(ctx context.Context) error
 	Close()
+
+	// Diagnostics
+	// ListTasks returns a job's remaining tasks (successful tasks are deleted),
+	// failed ones first. An empty status means every status.
+	ListTasks(ctx context.Context, jobID string, status domain.TaskStatus, limit int) ([]domain.Task, error)
+	InsertEvents(ctx context.Context, events []domain.LogEvent) error
+	// ListEvents returns matching events, newest first.
+	ListEvents(ctx context.Context, f EventFilter) ([]domain.LogEvent, error)
+	// PurgeEvents deletes events and worker heartbeats older than before.
+	PurgeEvents(ctx context.Context, before time.Time) (int64, error)
+	PutWorkerStatus(ctx context.Context, w domain.WorkerStatus) error
+	ListWorkerStatus(ctx context.Context, seenAfter time.Time) ([]domain.WorkerStatus, error)
+}
+
+// EventFilter selects log events. Zero fields do not filter.
+type EventFilter struct {
+	Levels   []string // e.g. WARN, ERROR
+	JobID    string
+	Source   string // exact queue name, or a prefix ending with "*"
+	Since    time.Time
+	BeforeID int64 // keyset pagination: events with a smaller id
+	Limit    int
+}
+
+// MatchEvent reports whether e passes f (Limit and BeforeID aside from the
+// id bound). Stores that cannot filter natively use it.
+func MatchEvent(e *domain.LogEvent, f EventFilter) bool {
+	if f.BeforeID > 0 && e.ID >= f.BeforeID {
+		return false
+	}
+	if len(f.Levels) > 0 && !slices.Contains(f.Levels, e.Level) {
+		return false
+	}
+	if f.JobID != "" && e.JobID != f.JobID {
+		return false
+	}
+	if f.Source != "" {
+		if p, ok := strings.CutSuffix(f.Source, "*"); ok {
+			if !strings.HasPrefix(e.Source, p) {
+				return false
+			}
+		} else if e.Source != f.Source {
+			return false
+		}
+	}
+	return f.Since.IsZero() || !e.Time.Before(f.Since)
 }

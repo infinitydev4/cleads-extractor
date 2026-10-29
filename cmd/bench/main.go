@@ -22,11 +22,14 @@ import (
 	"syscall"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/cleads/business-extractor/internal/domain"
 	"github.com/cleads/business-extractor/internal/engine"
 	"github.com/cleads/business-extractor/internal/geo"
 	"github.com/cleads/business-extractor/internal/geocode"
 	"github.com/cleads/business-extractor/internal/metrics"
+	"github.com/cleads/business-extractor/internal/obs"
 	"github.com/cleads/business-extractor/internal/source"
 	"github.com/cleads/business-extractor/internal/source/mock"
 	"github.com/cleads/business-extractor/internal/store"
@@ -60,6 +63,9 @@ type report struct {
 	NumCPU        int     `json:"num_cpu"`
 	GOOS          string  `json:"goos"`
 	GOARCH        string  `json:"goarch"`
+	LogTee        bool    `json:"log_tee"`
+	LogEvents     float64 `json:"log_events_stored,omitempty"`
+	LogDropped    float64 `json:"log_events_dropped,omitempty"`
 }
 
 func main() {
@@ -75,10 +81,16 @@ func main() {
 		pages     = flag.Int("pages", 3, "pages per query (20 results each)")
 		failRatio = flag.Float64("fail", 0.02, "transient failure probability")
 		jsonOut   = flag.Bool("json", false, "print JSON only")
+		logTee    = flag.Bool("log-tee", false, "production logger: JSON (discarded) + warnings teed to the events table")
 	)
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var tee *obs.Tee
+	m := metrics.New()
+	if *logTee {
+		log, tee = obs.NewLogger(io.Discard, "json", slog.LevelInfo, obs.TeeOptions{Worker: "bench", RingSize: 1000, Events: m.LogEvents})
+	}
 	ctx := context.Background()
 	var st store.Store
 	switch *storeKind {
@@ -103,14 +115,17 @@ func main() {
 
 	center := domain.Point{Lat: 45.76, Lng: 4.84}
 	area := geo.BBoxAround(center, *areaKm*1000/2)
-	m := metrics.New()
 	runCtx, cancel := context.WithCancel(ctx)
+	if tee != nil {
+		go tee.Run(runCtx, st)
+	}
 	var wg sync.WaitGroup
 	for w := 0; w < *workers; w++ {
 		src := mock.New(mock.Config{Latency: *latency, DensityKm2: *density, Pages: *pages, CellKm: *cellKm,
 			FailRatio: *failRatio, Concurrency: *conc})
 		e := engine.New(engine.Config{PollMin: 10 * time.Millisecond, PollMax: 200 * time.Millisecond,
-			FinalizeEvery: 100 * time.Millisecond, MinRetryAfter: 100 * time.Millisecond, DisableFinalize: w > 0},
+			FinalizeEvery: 100 * time.Millisecond, MinRetryAfter: 100 * time.Millisecond, DisableFinalize: w > 0,
+			WorkerID: workerID(*logTee, w)},
 			st, []source.Source{src}, geocode.Static{"bench": area}, nil, m, log)
 		wg.Add(1)
 		go func() { defer wg.Done(); _ = e.Run(runCtx) }()
@@ -165,13 +180,30 @@ func main() {
 		UsefulPerSec: round(float64(c.CRMUseful) / elapsed), TasksPerSec: round(float64(c.TasksDone) / elapsed),
 		UniquePerDay: float64(int64(float64(c.Unique) / elapsed * 86400)), UsefulPerDay: float64(int64(float64(c.CRMUseful) / elapsed * 86400)),
 		MaxRSSMB: round(maxRSS), HeapInuseMB: round(float64(ms.HeapInuse) / (1 << 20)), GoroutinesEnd: runtime.NumGoroutine(),
-		NumCPU: runtime.NumCPU(), GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
+		NumCPU: runtime.NumCPU(), GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, LogTee: *logTee,
+	}
+	if *logTee {
+		r.LogEvents, r.LogDropped = counter(m, "stored"), counter(m, "dropped")
 	}
 	if c.RawFound > 0 {
 		r.DupRatio = round(1 - float64(c.Unique)/float64(c.RawFound))
 	}
 	out, _ := json.MarshalIndent(r, "", "  ")
 	fmt.Println(string(out))
+}
+
+// workerID enables worker heartbeats with -log-tee (as in production).
+func workerID(on bool, i int) string {
+	if !on {
+		return ""
+	}
+	return fmt.Sprintf("bench-%d", i)
+}
+
+func counter(m *metrics.Metrics, outcome string) float64 {
+	var d dto.Metric
+	_ = m.LogEvents.WithLabelValues(outcome).Write(&d)
+	return d.GetCounter().GetValue()
 }
 
 func round(v float64) float64 { return float64(int64(v*100)) / 100 }

@@ -18,35 +18,55 @@ import (
 	"github.com/cleads/business-extractor/internal/engine"
 	"github.com/cleads/business-extractor/internal/geocode"
 	"github.com/cleads/business-extractor/internal/metrics"
+	"github.com/cleads/business-extractor/internal/obs"
 	"github.com/cleads/business-extractor/internal/source"
 	"github.com/cleads/business-extractor/internal/source/mock"
 	"github.com/cleads/business-extractor/internal/store/memstore"
 )
 
 const (
-	keyA = "key-a-0123456789abcdefghijkl"
-	keyB = "key-b-0123456789abcdefghijkl"
+	keyA     = "key-a-0123456789abcdefghijkl"
+	keyB     = "key-b-0123456789abcdefghijkl"
+	keyAdmin = "key-admin-0123456789abcdefgh"
 )
 
 func setup(t *testing.T) (*httptest.Server, func()) {
 	t.Helper()
+	srv, _, stop := setupWith(t)
+	return srv, stop
+}
+
+// setupWith starts an API with the mock source plus extra sources, a teed
+// logger (warnings reach the store) and worker heartbeats.
+func setupWith(t *testing.T, extra ...source.Source) (*httptest.Server, *Server, func()) {
+	t.Helper()
 	cfg := &config.Config{
-		APIKeys:       []config.APIKey{{ID: "crm", Hash: config.KeyHash(keyA)}, {ID: "other", Hash: config.KeyHash(keyB)}},
+		APIKeys: []config.APIKey{{ID: "crm", Hash: config.KeyHash(keyA)}, {ID: "other", Hash: config.KeyHash(keyB)},
+			{ID: "admin", Hash: config.KeyHash(keyAdmin)}},
 		RatePerKey:    1000,
 		MaxResultsCap: 10_000,
 		MaxBodyBytes:  1 << 16,
+		MCPEnabled:    true,
+		MCPMaxWait:    10 * time.Second,
+		Secrets:       []string{keyA, keyB, keyAdmin},
 	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log, tee := obs.NewLogger(io.Discard, "json", slog.LevelInfo, obs.TeeOptions{Worker: "test", RingSize: 100,
+		FlushEvery: 10 * time.Millisecond, Redactor: obs.NewRedactor(cfg.Secrets...)})
 	st := memstore.New()
 	m := metrics.New()
-	eng := engine.New(engine.Config{PollMin: 5 * time.Millisecond, PollMax: 20 * time.Millisecond, FinalizeEvery: 20 * time.Millisecond},
-		st, []source.Source{mock.New(mock.Config{CellKm: 1})},
+	eng := engine.New(engine.Config{PollMin: 5 * time.Millisecond, PollMax: 20 * time.Millisecond, FinalizeEvery: 20 * time.Millisecond,
+		WorkerID: "test-worker", StatusEvery: 20 * time.Millisecond},
+		st, append([]source.Source{mock.New(mock.Config{CellKm: 1})}, extra...),
 		geocode.Static{"lyon": {MinLat: 45.74, MinLng: 4.80, MaxLat: 45.76, MaxLng: 4.83}}, nil, m, log)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _ = eng.Run(ctx); close(done) }()
-	srv := httptest.NewServer(New(cfg, st, eng, m, log, "test").Handler())
-	return srv, func() { srv.Close(); cancel(); <-done }
+	teeDone := make(chan struct{})
+	go func() { tee.Run(ctx, st); close(teeDone) }()
+	api := New(cfg, st, eng, m, log, "test")
+	api.SetLogRing(tee.Ring())
+	srv := httptest.NewServer(api.Handler())
+	return srv, api, func() { srv.Close(); cancel(); <-done; <-teeDone }
 }
 
 func do(t *testing.T, method, url, key, body string, hdr ...string) (*http.Response, []byte) {

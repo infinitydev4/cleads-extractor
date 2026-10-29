@@ -39,7 +39,14 @@ type Store struct {
 	nextSeq  int64
 	jobLinks map[string][]link
 	jobSet   map[string]map[int64]struct{}
+
+	nextEvent int64
+	events    []domain.LogEvent // oldest first, bounded by maxEvents
+	workers   map[string]domain.WorkerStatus
 }
+
+// maxEvents bounds the in-memory event log (development only).
+const maxEvents = 50_000
 
 type taskItem struct {
 	t     domain.Task
@@ -77,6 +84,7 @@ func New() *Store {
 		tasks: map[int64]*taskItem{}, pending: map[string]*taskHeap{}, running: map[int64]time.Time{},
 		biz: map[int64]*domain.Business{}, keys: map[string]int64{},
 		jobLinks: map[string][]link{}, jobSet: map[string]map[int64]struct{}{},
+		workers: map[string]domain.WorkerStatus{},
 	}
 }
 
@@ -295,7 +303,9 @@ func (s *Store) CompleteTask(_ context.Context, t *domain.Task, out store.TaskOu
 		}
 		heap.Push(s.pending[it.t.Source], it)
 	default:
-		delete(s.tasks, t.ID)
+		// Failed tasks are kept for diagnostics, like pgstore does.
+		it.t.Status = domain.TaskFailed
+		it.t.LastError = out.Err
 		s.outstanding[t.JobID]--
 		if j != nil {
 			j.Counters.TasksFailed++
@@ -494,4 +504,103 @@ func (s *Store) Stats(context.Context) (store.Stats, error) {
 	}
 	st.TasksRunning = int64(len(s.running))
 	return st, nil
+}
+
+// ---------------------------------------------------------------- diagnostics
+
+func (s *Store) ListTasks(_ context.Context, jobID string, status domain.TaskStatus, limit int) ([]domain.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []domain.Task
+	for _, it := range s.tasks {
+		if it.t.JobID == jobID && (status == "" || it.t.Status == status) {
+			out = append(out, it.t)
+		}
+	}
+	sortTasks(out)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// sortTasks orders failed tasks first, then by id (same order as pgstore).
+func sortTasks(ts []domain.Task) {
+	sort.Slice(ts, func(a, b int) bool {
+		fa, fb := ts[a].Status == domain.TaskFailed, ts[b].Status == domain.TaskFailed
+		if fa != fb {
+			return fa
+		}
+		return ts[a].ID < ts[b].ID
+	})
+}
+
+func (s *Store) InsertEvents(_ context.Context, events []domain.LogEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range events {
+		s.nextEvent++
+		e.ID = s.nextEvent
+		s.events = append(s.events, e)
+	}
+	if n := len(s.events) - maxEvents; n > 0 {
+		s.events = append(s.events[:0:0], s.events[n:]...)
+	}
+	return nil
+}
+
+func (s *Store) ListEvents(_ context.Context, f store.EventFilter) ([]domain.LogEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	var out []domain.LogEvent
+	for i := len(s.events) - 1; i >= 0 && len(out) < limit; i-- {
+		e := s.events[i]
+		if store.MatchEvent(&e, f) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) PurgeEvents(_ context.Context, before time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := s.events[:0]
+	for _, e := range s.events {
+		if !e.Time.Before(before) {
+			kept = append(kept, e)
+		}
+	}
+	n := int64(len(s.events) - len(kept))
+	s.events = kept
+	for id, w := range s.workers {
+		if w.SeenAt.Before(before) {
+			delete(s.workers, id)
+		}
+	}
+	return n, nil
+}
+
+func (s *Store) PutWorkerStatus(_ context.Context, w domain.WorkerStatus) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workers[w.ID] = w
+	return nil
+}
+
+func (s *Store) ListWorkerStatus(_ context.Context, seenAfter time.Time) ([]domain.WorkerStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []domain.WorkerStatus
+	for _, w := range s.workers {
+		if w.SeenAt.After(seenAfter) {
+			out = append(out, w)
+		}
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].ID < out[b].ID })
+	return out, nil
 }

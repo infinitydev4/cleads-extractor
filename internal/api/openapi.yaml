@@ -141,6 +141,101 @@ components:
         sources: { type: array, items: { type: string } }
         completeness: { type: integer, minimum: 0, maximum: 100 }
         source_url: { type: string }
+    Task:
+      type: object
+      properties:
+        id: { type: integer }
+        job_id: { type: string }
+        kind: { type: string, enum: [plan, search, details, enrich] }
+        source: { type: string, description: "Queue: a source name, <source>.details, _plan or _enrich." }
+        payload: { type: object }
+        priority: { type: integer }
+        attempts: { type: integer }
+        status: { type: string, enum: [pending, running, failed] }
+        run_after: { type: string, format: date-time }
+        last_error: { type: string }
+    LogEvent:
+      type: object
+      properties:
+        id: { type: integer }
+        ts: { type: string, format: date-time }
+        level: { type: string, enum: [DEBUG, INFO, WARN, ERROR] }
+        msg: { type: string }
+        job_id: { type: string }
+        task_id: { type: integer }
+        source: { type: string }
+        worker: { type: string }
+        attrs: { type: object }
+    JobErrors:
+      type: object
+      properties:
+        job_id: { type: string }
+        status: { type: string }
+        job_error: { type: string }
+        tasks_failed: { type: integer }
+        tasks_retrying: { type: integer }
+        summary: { type: string, example: "12 × http 500 on google_maps_http.details (failed)" }
+        groups:
+          type: array
+          items:
+            type: object
+            properties:
+              count: { type: integer }
+              kind: { type: string, enum: [failed_task, retrying_task, event] }
+              source: { type: string }
+              cause: { type: string }
+              example: { type: string }
+              last_seen: { type: string, format: date-time }
+              task_ids: { type: array, items: { type: integer } }
+    OutcomeCounts:
+      type: object
+      properties:
+        ok: { type: integer }
+        error: { type: integer }
+        rate_limited: { type: integer }
+        blocked: { type: integer }
+        permanent: { type: integer }
+    HealthSummary:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, degraded, down] }
+        summary: { type: string, description: One finding per line. }
+        checked_at: { type: string, format: date-time }
+        database:
+          type: object
+          properties: { ok: { type: boolean }, latency_ms: { type: number }, error: { type: string } }
+        queue:
+          type: object
+          properties:
+            pending: { type: object, additionalProperties: { type: integer } }
+            running: { type: integer }
+        jobs: { type: object, additionalProperties: { type: integer } }
+        workers:
+          type: array
+          items:
+            type: object
+            properties: { id: { type: string }, role: { type: string }, version: { type: string }, seen_at: { type: string, format: date-time } }
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              verdict: { type: string, enum: [ok, idle, throttled, blocked, failing, no_worker] }
+              detail: { type: string }
+              circuit_open: { type: boolean }
+              circuit_open_until: { type: string, format: date-time }
+              rate: { type: number, description: Current adaptive rate summed over workers (req/s). }
+              base_rate: { type: number }
+              workers: { type: integer }
+              in_flight: { type: integer }
+              pending: { type: integer }
+              recent: { $ref: "#/components/schemas/OutcomeCounts" }
+              error_rate: { type: number }
+              window_seconds: { type: integer }
+        recent_errors: { type: array, items: { $ref: "#/components/schemas/LogEvent" } }
+        recent_error_count: { type: integer }
+        recent_window: { type: string }
 paths:
   /healthz:
     get: { summary: Liveness, security: [], responses: { "200": { description: OK } } }
@@ -173,7 +268,7 @@ paths:
                   planned_sources: { type: array, items: { type: string } }
                   skipped_sources: { type: object, additionalProperties: { type: string } }
                   links: { type: object, additionalProperties: { type: string } }
-        "200": { description: Idempotent replay }
+        "200": { description: "Idempotent replay (same body, replayed: true)" }
         "400": { description: Invalid JSON, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "422": { description: Invalid spec, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     get:
@@ -238,7 +333,90 @@ paths:
         - { $ref: "#/components/parameters/HasPhone" }
         - { $ref: "#/components/parameters/HasEmail" }
         - { $ref: "#/components/parameters/Useful" }
-      responses: { "200": { description: File stream } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000 }, description: "Chunk mode: return at most this many rows after cursor instead of the whole stream. The CSV header is sent only when cursor is 0, so chunks concatenate into one file." }
+        - { name: cursor, in: query, schema: { type: string }, description: "Chunk mode: X-Next-Cursor of the previous chunk (0 for the first)." }
+        - { name: max_bytes, in: query, schema: { type: integer, minimum: 1024, maximum: 1048576 }, description: "Chunk mode: byte budget (whole rows only)." }
+      responses:
+        "200":
+          description: "File stream. In chunk mode, headers X-Next-Cursor, X-Export-Rows and X-Export-Done describe the chunk."
+  /v1/jobs/{id}/tasks:
+    get:
+      summary: Remaining tasks of a job (diagnostics)
+      description: |
+        Successful tasks are deleted from the queue, so this lists pending,
+        running and failed tasks only, failed first. `last_error` is redacted
+        (credentials masked).
+      parameters:
+        - { $ref: "#/components/parameters/JobID" }
+        - { name: status, in: query, schema: { type: string, enum: [failed, pending, running] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tasks: { type: array, items: { $ref: "#/components/schemas/Task" } }
+        "404": { description: Not found (or another key's job) }
+  /v1/jobs/{id}/errors:
+    get:
+      summary: Why a job failed — failures grouped by cause
+      description: |
+        Combines failed tasks, retrying tasks (their last error) and the
+        job's warning/error events, grouped by normalized cause (ids, URLs and
+        timestamps folded), e.g. "12 × http 500 on google_maps_http.details".
+      parameters: [{ $ref: "#/components/parameters/JobID" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobErrors" }
+        "404": { description: Not found (or another key's job) }
+  /v1/logs:
+    get:
+      summary: Warnings and errors of every process (admin key only)
+      description: |
+        Reads the `events` table, filled asynchronously by every API and worker
+        process (WARN and above, kept EVENTS_RETENTION). With `local=true`,
+        reads instead the in-memory ring of recent records (INFO and above) of
+        the replica serving the request. Secrets are masked. Other keys get 403:
+        logs mix every client.
+      parameters:
+        - { name: level, in: query, schema: { type: string, enum: [debug, info, warn, error], default: warn }, description: Minimum level. }
+        - { name: job_id, in: query, schema: { type: string } }
+        - { name: source, in: query, schema: { type: string }, description: "Queue name (google_maps_http.details), or a prefix ending with * (google_maps_http*)." }
+        - { name: since, in: query, schema: { type: string }, description: "RFC 3339 time or a duration back from now (15m, 2h)." }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+        - { name: local, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: Newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scope: { type: string, enum: [database, process] }
+                  events: { type: array, items: { $ref: "#/components/schemas/LogEvent" } }
+        "403": { description: Not the admin key }
+  /v1/health/summary:
+    get:
+      summary: Aggregated health — answers "is Google blocking us?"
+      description: |
+        Database reachability, queue depth by source, live workers (heartbeats
+        every 10 s), and per source: circuit breaker state, current vs.
+        configured adaptive rate, request outcomes over the last 5 minutes and
+        a verdict (ok, idle, throttled, blocked, failing, no_worker).
+        `recent_errors` (last warnings/errors) is filled for the admin key only.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthSummary" }
   /v1/businesses:
     get:
       summary: Search the consolidated prospecting base (all jobs, deduplicated)

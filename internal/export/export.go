@@ -35,11 +35,21 @@ var Columns = []string{
 // New returns a writer for format "csv", "csv-excel" (semicolon + BOM, for
 // French Excel) or "jsonl".
 func New(w io.Writer, format string) (Writer, error) {
+	return newWriter(w, format, true)
+}
+
+// NewContinuation returns a writer for a later chunk of an export: no CSV
+// header and no BOM, so chunks concatenate into the same file as New.
+func NewContinuation(w io.Writer, format string) (Writer, error) {
+	return newWriter(w, format, false)
+}
+
+func newWriter(w io.Writer, format string, first bool) (Writer, error) {
 	switch strings.ToLower(format) {
 	case "", "csv":
-		return newCSV(w, ',', false), nil
+		return newCSV(w, ',', false, first), nil
 	case "csv-excel", "excel":
-		return newCSV(w, ';', true), nil
+		return newCSV(w, ';', first, first), nil
 	case "jsonl", "ndjson":
 		bw := bufio.NewWriterSize(w, 64<<10)
 		return &jsonlWriter{bw: bw, enc: json.NewEncoder(bw)}, nil
@@ -54,14 +64,14 @@ type csvWriter struct {
 	hdr bool
 }
 
-func newCSV(w io.Writer, sep rune, bom bool) *csvWriter {
+func newCSV(w io.Writer, sep rune, bom, header bool) *csvWriter {
 	bw := bufio.NewWriterSize(w, 64<<10)
 	if bom {
 		_, _ = bw.WriteString("\xEF\xBB\xBF") // UTF-8 BOM
 	}
 	cw := csv.NewWriter(bw)
 	cw.Comma = sep
-	return &csvWriter{bw: bw, cw: cw, row: make([]string, len(Columns))}
+	return &csvWriter{bw: bw, cw: cw, row: make([]string, len(Columns)), hdr: !header}
 }
 
 func (c *csvWriter) ContentType() string { return "text/csv; charset=utf-8" }
