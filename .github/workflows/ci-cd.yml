@@ -146,12 +146,16 @@ jobs:
             IdentitiesOnly yes
             StrictHostKeyChecking yes
             ServerAliveInterval 15
+            # one connection for the whole job: the server rate-limits new SSH connections (ufw limit)
+            ControlMaster auto
+            ControlPath ~/.ssh/cm-%C
+            ControlPersist 5m
           EOF
       - name: Sync deployment files
         if: steps.cfg.outputs.enabled == 'true'
         run: |
           scp deploy/prod/docker-compose.yml deploy/prod/Caddyfile deploy/prod/deploy.sh \
-              deploy/prod/backup.sh deploy/prod/init-env.sh vps:/opt/cleads/
+              deploy/prod/backup.sh deploy/prod/init-env.sh deploy/prod/bootstrap.sh vps:/opt/cleads/
           ssh vps 'chmod +x /opt/cleads/*.sh'
       - name: Deploy ${{ env.TAG }}
         if: steps.cfg.outputs.enabled == 'true'

@@ -91,7 +91,15 @@ curl -s localhost:8080/readyz
 1. **Cadence** : `SOURCE_RATE=google_maps_http=…` (par worker). Commencez bas (4) et surveillez `cleads_source_requests_total{outcome=~"blocked|rate_limited"}` et `cleads_source_circuit_open` (`GET /metrics`, clé API).
 2. **Plus d'adresses IP** : proxies résidentiels (`GMAPS_PROXIES`), ou un second VPS qui exécute uniquement un `worker` pointant vers la même base. Ne publiez jamais PostgreSQL sur Internet : passez par un VPN privé (WireGuard, Tailscale).
 
-## 5. Dépannage
+## 5. Points d'exploitation à connaître
+
+- **Métriques du moteur** : les compteurs de requêtes (`cleads_source_requests_total`…) vivent dans le **worker**, pas dans l'API. `GET /metrics` sur le domaine public ne renvoie que les métriques HTTP. Le worker est joignable en local sur le serveur : `curl -H "Authorization: Bearer <clé>" http://127.0.0.1:8081/metrics` (pour Prometheus, passez par un tunnel SSH ou un VPN, jamais en public). La synthèse prête à lire, tirée de la base, est `GET /v1/health/summary` (clé admin).
+- **SSH** : le script d'installation laisse l'authentification par mot de passe active tant qu'aucune clé n'est installée (protection : `fail2ban` + `ufw limit`). Dès que votre clé est dans `~/.ssh/authorized_keys` du compte `debian` (`ssh-copy-id`), fermez le mot de passe : `sudo HARDEN_SSH=1 /opt/cleads/bootstrap.sh`, et vérifiez la connexion par clé **dans un second terminal avant de fermer le premier**.
+- **Limite de connexions SSH** : `ufw limit 22` refuse une IP qui ouvre 6 connexions en 30 s. Les scripts enchaînés doivent réutiliser une connexion (`ControlMaster auto`, déjà fait dans le pipeline).
+- **CPU** : le crawl des sites web (enrichissement) est limité par le CPU (expressions régulières sur des pages jusqu'à 1 Mo). Sur 2 vCPU, `ENRICH_CONCURRENCY=8` par défaut ; mesuré à 32 : 130 à 185 % de CPU soutenus par le worker. Piste d'optimisation : préfiltrer les pages avant les expressions régulières.
+- **Sauvegardes** : elles restent sur le même disque (`/opt/cleads/backups`). Copiez-les hors du serveur.
+
+## 6. Dépannage
 
 | Symptôme | Piste |
 |---|---|

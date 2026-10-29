@@ -116,7 +116,24 @@ Jobs lancés depuis la même IP française, **sans préciser le pays** (détect�
 
 Recherche en arabe (`سباك`) également validée. Particularités traitées : numéros pris dans le format international fourni par Google (valable pour tous les pays), pays et ville lus dans le bloc adresse (pas de code postal aux Émirats), et géocodage mondial quand le pays n'est pas fourni. Sans ce dernier point, « Dubai Marina » se résolvait en un lieu homonyme… à Rennes.
 
-### 3.5 Ce que cela implique, et ce qui n'est pas mesuré
+### 3.5 Depuis l'IP d'un VPS OVH (production, 29/10/2026)
+
+Mêmes tests, lancés par l'API publique du serveur de production : **OVHcloud VPS-1** (2 vCPU, 4 Go, Gravelines), donc une **IP de datacenter**, sans proxy. Chaque job interroge uniquement Google Maps.
+
+| Cadence | Job | Durée | Requêtes | Erreurs | Fiches uniques | Fiches/min |
+|---|---|---|---|---|---|---|
+| 4 req/s | boulangeries, Lyon 3e | 85 s | 311 | 0 | 279 | 197 |
+| 4 req/s | boulangeries, Lyon 6e | 36 s | 137 | 0 | 180 | 297 |
+| 8 req/s | boulangeries, Lyon 7e | 32 s | 216 | 5 (HTTP 500, rejouées avec succès) | 273 | 513 |
+| 12 req/s | restaurants, Lyon 8e | 29 s | 302 | 0 | 262 | 550 |
+| 8 req/s | coiffeurs, Lyon entier + enrichissement | 275 s | 1 499 | 0 | 1 137 | 249 |
+| 8 req/s | plombiers, Lyon entier + enrichissement | 85 s | 569 | 0 | 359 | 254 |
+
+**≈ 3 000 requêtes en 15 minutes, aucun blocage, aucune limitation de débit (429), aucune tâche perdue.** Latence moyenne : 0,4 à 0,5 s en recherche, 0,35 à 0,47 s en détail. Consommation du serveur : worker 38 à 63 Mo de RAM, PostgreSQL 86 à 122 Mo, hôte à 830 Mo sur 3,8 Go ; le CPU du worker atteint 130 à 185 % de 2 cœurs pendant le crawl des sites (voir `docs/DEPLOY_VPS.md` §5).
+
+**Limites de cette mesure** : environ 5 minutes par job, une seule adresse, quelques milliers de requêtes ; la tenue sur 24 h et sur plusieurs jours n'est **pas** mesurée. Cadence de production retenue : **8 req/s**.
+
+### 3.6 Ce que cela implique, et ce qui n'est pas mesuré
 
 - **Une IP à 8 req/s ≈ 350 fiches complètes/min.** 50 000 fiches/jour ≈ 65 000 requêtes, soit **0,8 req/s en moyenne** ; 100 000/jour ≈ 1,6 req/s. Les deux objectifs sont donc atteignables **en quelques heures** de travail effectif par jour, sur une IP.
 - **Non mesuré** : la tolérance de Google sur 24 h en continu, et depuis les IP de datacenter de Railway (en général plus surveillées que les IP résidentielles). Avant d'y monter en volume, lancer le même protocole depuis Railway ; prévoir des proxies résidentiels (`GMAPS_PROXIES`) pour 100 000+/jour.
