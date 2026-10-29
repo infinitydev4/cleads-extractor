@@ -1,6 +1,6 @@
 # Serveur MCP
 
-Le serveur MCP (Model Context Protocol) permet à un agent LLM (Claude Desktop, Claude Code, agent maison) de **tout faire avec l'API** : lancer une extraction, la suivre, lire et exporter les résultats, interroger la base consolidée et diagnostiquer seul un job qui échoue.
+Le serveur MCP (Model Context Protocol) permet à un agent LLM (Claude Code, Claude Desktop, Cursor, agent maison) de **tout faire avec l'API** : lancer une extraction, la suivre, lire et exporter les résultats, interroger la base consolidée et diagnostiquer seul un job qui échoue.
 
 | | |
 |---|---|
@@ -24,7 +24,7 @@ Les outils ne dépendent que de l'interface `internal/backend.Backend`, impléme
 Les routes REST appellent elles aussi `api.Server.Backend`. Le REST, `/mcp` et le stdio appliquent donc les mêmes règles : validation, isolation des jobs par clé, droits `admin`.
 
 ### Transport HTTP
-- **Sans état** (`Stateless: true`) : aucune session n'est gardée entre deux requêtes, donc n'importe quel réplica de l'API sert n'importe quel appel, sans affinité de session derrière le répartiteur de Railway. Les notifications de progression passent dans le flux SSE de la réponse de l'appel qui les émet. `GET` et `DELETE /mcp` répondent 405.
+- **Sans état** (`Stateless: true`) : aucune session n'est gardée entre deux requêtes, donc n'importe quel réplica de l'API sert n'importe quel appel, sans affinité de session derrière Caddy, le répartiteur de Railway ou tout autre proxy. Les notifications de progression passent dans le flux SSE de la réponse de l'appel qui les émet. `GET` et `DELETE /mcp` répondent 405.
 - **Authentification** : la même que le REST (`Authorization: Bearer <clé>` ou `X-API-Key`), avec le même rate-limit par clé. Un appel d'outil compte comme une requête. L'identité de la clé est transmise au SDK par `auth.TokenInfo`.
 - **Origin** : une requête qui porte un en-tête `Origin` hors de `MCP_ALLOWED_ORIGINS` ∪ `CORS_ORIGINS`, et qui n'est pas de même origine, est refusée en 403, comme l'exige la spécification contre le DNS rebinding. Les clients non-navigateurs n'envoient pas d'`Origin` et ne sont pas concernés. La protection « localhost » du SDK reste active.
 - **Timeouts** : `cmd/server` coupe les réponses à 60 s (`WriteTimeout`). Pour `/mcp`, la deadline d'écriture est relevée à `MCP_MAX_WAIT + 30 s` et reste bornée, comme pour le SSE et l'export. Vérifié avec un `wait_for_job` de 75 s.
@@ -79,11 +79,75 @@ Prompts :
 5. `get_system_health {}` → « no source is blocked; google_maps_http: ok — 412 requests in 5m0s… ». Conclusion : erreurs transitoires de Google sur 3 fiches, pas de blocage.
 6. `export_job {"job_id":"job_…","format":"csv-excel","useful":true}` → lien de ressource et URL de téléchargement.
 
-## 5. Configuration des clients
+## 5. Brancher les clients sur la production (VPS OVH)
+
+L'instance de production tourne sur le VPS OVH décrit dans [DEPLOY_VPS.md](DEPLOY_VPS.md). Caddy sert le MCP en HTTPS (certificat automatique) :
+
+```
+https://vps-xxxxxxxx.vps.ovh.net/mcp        ← remplacer par le DOMAIN de /opt/cleads/.env
+```
+
+L'URL réelle et les clés sont dans `/opt/cleads/.env` (`DOMAIN`, `API_KEYS=admin:…,crm:…`). Dans les exemples ci-dessous, `$CLEADS_URL` vaut `https://vps-xxxxxxxx.vps.ovh.net` et `$CLEADS_API_KEY` la clé choisie.
+
+### Quelle clé donner à quel agent ?
+
+| Clé | Voit | Utiliser pour |
+|---|---|---|
+| `crm` | seulement ses propres jobs ; `get_logs` refusé (`forbidden`) | agents de prospection au quotidien |
+| `admin` | tous les jobs, `get_logs`, dernières erreurs dans `get_system_health` | agent d'exploitation qui diagnostique la production |
+
+Donnez une clé par agent ou par outil (`API_KEYS=admin:…,crm:…,cursor:…`, puis `docker compose up -d api worker`) : on retire l'accès d'un client sans toucher aux autres. Ne mettez jamais une clé dans un dépôt : utilisez une variable d'environnement.
+
+### Tableau de compatibilité
+
+| Client | Transport | Authentification par clé API | Statut |
+|---|---|---|---|
+| **Claude Code** | HTTP direct ou stdio | `--header` | ✅ vérifié (HTTP et stdio, contre la production) |
+| **Claude Desktop** | stdio (`cleads-mcp`) | variables d'environnement | ✅ stdio vérifié contre la production |
+| **Claude.ai** (connecteur personnalisé) | HTTP, appelé **depuis le cloud d'Anthropic** | *Request headers* (bêta) | ⚠️ non essayé : l'option n'est pas ouverte à tous les comptes |
+| **Cursor** | HTTP direct ou stdio | `headers` dans `mcp.json` | ✅ requêtes équivalentes vérifiées avec curl ; Cursor lui-même non lancé |
+| **ChatGPT** (connecteur) | HTTP, appelé depuis le cloud d'OpenAI | ❌ OAuth ou aucune authentification seulement | ⛔ **pas branchable en l'état** (voir plus bas) |
+
+« Vérifié » signifie : appel réel contre `https://<domaine>/mcp` le 29/10/2026. Les 15 outils sont listés avec l'en-tête `Authorization: Bearer` comme avec `X-API-Key`; sans clé la réponse est 401; un en-tête `Origin` étranger donne 403; la clé `crm` reçoit `forbidden` sur `get_logs` et la clé `admin` obtient `get_system_health`.
+
+### Claude Code
+
+```bash
+export CLEADS_URL=https://vps-xxxxxxxx.vps.ovh.net
+export CLEADS_API_KEY=<clé crm ou admin>
+
+# HTTP direct (recommandé : rien à installer)
+claude mcp add --transport http cleads "$CLEADS_URL/mcp" --header "Authorization: Bearer $CLEADS_API_KEY"
+
+# vérifier : « ✔ Connected » attendu
+claude mcp list
+```
+
+Portée : `--scope user` pour tous vos projets, `--scope project` pour écrire `.mcp.json` et le partager avec l'équipe. Dans ce second cas, **ne mettez pas la clé en clair** : référencez une variable.
+
+```json
+{
+  "mcpServers": {
+    "cleads": {
+      "type": "http",
+      "url": "${CLEADS_URL}/mcp",
+      "headers": { "Authorization": "Bearer ${CLEADS_API_KEY}" }
+    }
+  }
+}
+```
+
+Variante stdio (binaire local `bin/cleads-mcp`, obtenu avec `make build`) :
+
+```bash
+claude mcp add cleads --env CLEADS_URL=$CLEADS_URL --env CLEADS_API_KEY=$CLEADS_API_KEY -- /chemin/vers/bin/cleads-mcp
+```
+
+Si `claude mcp list` affiche `✘ Failed to connect`, `claude mcp get cleads` donne le code HTTP : 401 = clé fausse, 403 = en-tête `Origin` refusé.
 
 ### Claude Desktop (`claude_desktop_config.json`)
 
-Avec le binaire local (`make build` → `bin/cleads-mcp`) :
+Claude Desktop lance un processus local : utilisez le mode **stdio**, qui parle à la production par son API REST.
 
 ```json
 {
@@ -91,7 +155,7 @@ Avec le binaire local (`make build` → `bin/cleads-mcp`) :
     "cleads": {
       "command": "/chemin/vers/bin/cleads-mcp",
       "env": {
-        "CLEADS_URL": "https://cleads-api.up.railway.app",
+        "CLEADS_URL": "https://vps-xxxxxxxx.vps.ovh.net",
         "CLEADS_API_KEY": "<votre clé API>"
       }
     }
@@ -99,45 +163,89 @@ Avec le binaire local (`make build` → `bin/cleads-mcp`) :
 }
 ```
 
-Ou avec l'image Docker, sans rien installer :
+Sans compiler : l'image de production contient le même binaire (`docker login ghcr.io` d'abord si le paquet est privé).
 
 ```json
 {
   "mcpServers": {
     "cleads": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "CLEADS_URL", "-e", "CLEADS_API_KEY", "cleads-extractor:latest", "mcp"],
-      "env": { "CLEADS_URL": "https://cleads-api.up.railway.app", "CLEADS_API_KEY": "<votre clé API>" }
+      "args": ["run", "-i", "--rm", "-e", "CLEADS_URL", "-e", "CLEADS_API_KEY", "ghcr.io/infinitydev4/cleads-extractor:latest", "mcp"],
+      "env": { "CLEADS_URL": "https://vps-xxxxxxxx.vps.ovh.net", "CLEADS_API_KEY": "<votre clé API>" }
     }
   }
 }
 ```
 
-Variables du mode stdio : `CLEADS_URL` et `CLEADS_API_KEY` (obligatoires), `CLEADS_MCP_MAX_WAIT` (plafond de `wait_for_job`, 120 s par défaut). Les journaux du mode stdio sortent sur stderr, clé masquée.
+Variables du mode stdio : `CLEADS_URL` et `CLEADS_API_KEY` (obligatoires), `CLEADS_MCP_MAX_WAIT` (plafond de `wait_for_job`, 120 s par défaut). Les journaux du mode stdio sortent sur stderr, clé masquée. Redémarrez Claude Desktop après modification.
 
-### Claude Code
+### Claude.ai (connecteur personnalisé)
 
-```bash
-# HTTP (recommandé quand l'instance est déployée)
-claude mcp add --transport http cleads https://cleads-api.up.railway.app/mcp --header "Authorization: Bearer $CLEADS_API_KEY"
+Réglages → Connecteurs → *Ajouter un connecteur personnalisé* :
+
+1. URL du serveur MCP : `https://vps-xxxxxxxx.vps.ovh.net/mcp`.
+2. Authentification : **No sign-in**. L'option est trompeuse : elle signifie « pas d'OAuth », la clé est envoyée par l'en-tête.
+3. *Request headers* → nom `x-api-key` (dans la liste proposée, et accepté par notre serveur), valeur = la clé, **requis**.
+
+Points à connaître : l'option *Request headers* est en **bêta, réservée à certaines organisations** (si elle n'apparaît pas, ce compte ne peut pas brancher ce serveur à clé statique) ; l'authentification **ne se modifie pas** après création (supprimer puis recréer pour changer de clé) ; la clé est partagée par tous les membres de l'organisation ; les requêtes partent du **cloud d'Anthropic**, donc le VPS doit rester joignable depuis Internet sur 443 (c'est le cas). Source : [documentation des connecteurs personnalisés](https://claude.com/docs/connectors/custom/remote-mcp). Cette configuration n'a pas été essayée ici.
+
+### Cursor
+
+Fichier `~/.cursor/mcp.json` (tous les projets) ou `.cursor/mcp.json` (un projet). Cursor résout `${env:NOM}` dans `url` et `headers` : la clé reste dans votre environnement, pas dans le fichier.
+
+```json
+{
+  "mcpServers": {
+    "cleads": {
+      "url": "https://vps-xxxxxxxx.vps.ovh.net/mcp",
+      "headers": { "Authorization": "Bearer ${env:CLEADS_API_KEY}" }
+    }
+  }
+}
 ```
 
-```bash
-# stdio
-claude mcp add cleads --env CLEADS_URL=https://cleads-api.up.railway.app --env CLEADS_API_KEY=$CLEADS_API_KEY -- /chemin/vers/bin/cleads-mcp
+Variante stdio :
+
+```json
+{
+  "mcpServers": {
+    "cleads": {
+      "type": "stdio",
+      "command": "/chemin/vers/bin/cleads-mcp",
+      "env": { "CLEADS_URL": "https://vps-xxxxxxxx.vps.ovh.net", "CLEADS_API_KEY": "${env:CLEADS_API_KEY}" }
+    }
+  }
+}
 ```
+
+Lancez Cursor depuis un terminal où `CLEADS_API_KEY` est exportée (une application ouverte depuis le Dock ne voit pas les variables de votre shell). Un rapport du forum Cursor signale que certains en-têtes personnalisés seraient perdus sur `tools/call` en Streamable HTTP : si `tools/list` marche mais pas les appels, passez à la variante stdio, qui n'a pas ce problème.
+
+### ChatGPT : pas branchable en l'état
+
+Le connecteur personnalisé de ChatGPT ([documentation OpenAI](https://developers.openai.com/api/docs/guides/custom-mcp-server)) ne propose que **OAuth**, **aucune authentification** ou un mode mixte. Il n'envoie pas de clé statique en en-tête, et il n'exécute pas de processus local (pas de stdio). Notre serveur n'accepte qu'une clé statique et n'implémente pas OAuth. Conséquences :
+
+- **Ne choisissez pas « aucune authentification »** : l'URL est publique, et ce serveur lance des extractions et expose des coordonnées d'entreprises. Il répondrait 401, mais ne contournez jamais cette protection.
+- Pour ChatGPT, il faut **ajouter OAuth au serveur** (métadonnées de ressource protégée, serveur d'autorisation ou fournisseur d'identité externe). C'est un chantier à part, non fait.
+- Par **programmation**, l'outil MCP distant de l'API OpenAI (Responses API) accepte un jeton et des en-têtes de la part de votre code : `{"type":"mcp","server_label":"cleads","server_url":"https://…/mcp","authorization":"<clé>"}`. C'est le chemin à privilégier pour un agent maison fondé sur les modèles OpenAI. **Non essayé ici** (pas de clé OpenAI).
 
 ### Client HTTP générique
 
-Point d'accès `POST https://<domaine>/mcp`, en-têtes `Authorization: Bearer <clé>`, `Content-Type: application/json`, `Accept: application/json, text/event-stream`. La réponse est un flux SSE qui contient les éventuelles notifications puis le résultat.
+Point d'accès `POST https://<domaine>/mcp`, en-têtes `Authorization: Bearer <clé>` (ou `X-API-Key: <clé>`), `Content-Type: application/json`, `Accept: application/json, text/event-stream`. La réponse est un flux SSE qui contient les éventuelles notifications puis le résultat.
 
 ```bash
-curl -N https://<domaine>/mcp -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+curl -N "$CLEADS_URL/mcp" -H "Authorization: Bearer $CLEADS_API_KEY" -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' -H 'MCP-Protocol-Version: 2025-11-25' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_system_health","arguments":{}}}'
 ```
 
 En Go : `mcp.StreamableClientTransport{Endpoint: url + "/mcp", HTTPClient: <client qui ajoute l'en-tête>}`. Voir `internal/api/mcp_test.go`.
+
+### Particularités de la production
+
+- **Délais** : Caddy ne met pas les flux MCP en tampon ni ne les compresse (`flush_interval -1`) ; `wait_for_job` rend la main avec `timed_out: true` avant 120 s et l'agent rappelle l'outil. Pendant un redémarrage de l'API (déploiement), un appel en cours échoue et l'agent le répète. Pour `create_extraction_job`, l'agent doit réutiliser l'`idempotency_key` renvoyée à la première réponse : sans elle, une répétition créerait un second job.
+- **Origin** : les clients de bureau et les agents n'envoient pas d'`Origin`. Un client **web** hébergé sur un autre domaine doit être déclaré dans `MCP_ALLOWED_ORIGINS` (`/opt/cleads/.env`, puis `docker compose up -d api`), sinon 403.
+- **Rotation** : changer une clé dans `API_KEYS` coupe immédiatement le client concerné ; mettez à jour sa configuration (Claude.ai : supprimer et recréer le connecteur).
+- **Surveillance** : un agent avec la clé `admin` peut répondre à « la production va-t-elle bien ? » avec `get_system_health` et `get_logs`, sans accès SSH.
 
 ## 6. Vérifier avec MCP Inspector
 

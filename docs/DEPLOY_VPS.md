@@ -44,7 +44,7 @@ sudo -u deploy SKIP_PULL=1 /opt/cleads/deploy.sh bootstrap
 
 Quand la connexion par clé est vérifiée, fermer le mot de passe SSH : `sudo HARDEN_SSH=1 ./deploy/prod/bootstrap.sh` (clé uniquement, root interdit, `00-cleads.conf` prend le pas sur les fichiers cloud-init).
 
-Les clés d'API sont dans `/opt/cleads/.env` (`API_KEYS=admin:…,crm:…`). La clé `admin` voit tous les jobs et les journaux ; `crm` est destinée à l'application métier.
+Les clés d'API sont dans `/opt/cleads/.env` (`API_KEYS=admin:…,crm:…`). La clé `admin` voit tous les jobs et les journaux ; `crm` est destinée à l'application métier. Pour brancher des agents LLM (Claude Code, Cursor…) sur `https://<domaine>/mcp`, voir [MCP.md](MCP.md#5-brancher-les-clients-sur-la-production-vps-ovh).
 
 ## 3. Pipeline CI/CD (GitHub Actions)
 

@@ -13,7 +13,7 @@ API REST en Go pour **rechercher, extraire, normaliser, dédupliquer, enrichir e
 | [docs/DEPLOY_VPS.md](docs/DEPLOY_VPS.md) | **Production sur VPS** (Docker, HTTPS, sauvegardes) et pipeline CI/CD GitHub Actions |
 | [docs/RAILWAY.md](docs/RAILWAY.md) | Déploiement sur Railway, dimensionnement, exploitation |
 | [docs/COMPLIANCE.md](docs/COMPLIANCE.md) | Licences des sources, RGPD/CNIL, sécurité |
-| [docs/MCP.md](docs/MCP.md) | Serveur MCP pour agents LLM : outils, ressources, configuration de Claude Desktop / Claude Code |
+| [docs/MCP.md](docs/MCP.md) | Serveur MCP pour agents LLM : outils, ressources, branchement de Claude Code, Claude Desktop, Claude.ai, Cursor et ChatGPT sur la production |
 | `GET /docs` | Référence OpenAPI interactive (spécification : `internal/api/openapi.yaml`) |
 
 ## Démarrage rapide
