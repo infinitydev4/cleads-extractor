@@ -1053,6 +1053,7 @@ func (s *Store) ListEvents(ctx context.Context, f store.EventFilter) ([]domain.L
 		if err := rows.Scan(&e.ID, &e.Time, &e.Level, &e.Msg, &e.JobID, &e.TaskID, &e.Source, &e.Worker, &attrs); err != nil {
 			return nil, err
 		}
+		e.Time = e.Time.UTC()
 		if len(attrs) > 2 {
 			if err := json.Unmarshal(attrs, &e.Attrs); err != nil {
 				return nil, fmt.Errorf("decode event attrs: %w", err)
@@ -1103,6 +1104,7 @@ func (s *Store) ListWorkerStatus(ctx context.Context, seenAfter time.Time) ([]do
 		if err := rows.Scan(&w.ID, &w.Role, &w.Version, &w.StartedAt, &w.SeenAt, &src); err != nil {
 			return nil, err
 		}
+		w.StartedAt, w.SeenAt = w.StartedAt.UTC(), w.SeenAt.UTC()
 		if err := json.Unmarshal(src, &w.Sources); err != nil {
 			return nil, fmt.Errorf("decode worker sources: %w", err)
 		}
