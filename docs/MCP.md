@@ -166,7 +166,12 @@ npx @modelcontextprotocol/inspector --cli ./bin/cleads-mcp -e CLEADS_URL=http://
   --method tools/call --tool-name get_system_health
 ```
 
-> **État de la vérification** : pendant le développement, le téléchargement de l'Inspector depuis npm a été bloqué par la politique d'exécution de l'environnement. Les commandes ci-dessus suivent la documentation de l'Inspector mais **n'ont pas été exécutées**. Les mêmes parcours ont été vérifiés autrement, contre le binaire réel et PostgreSQL : JSON-RPC brut avec `curl` sur `/mcp` (initialize, `tools/list`, appels, notifications de progression, `wait_for_job` de 75 s, 401 sans clé, 403 pour une `Origin` étrangère) ; JSON-RPC sur stdin/stdout avec `cleads-extractor mcp` ; client Go officiel du SDK dans les tests (en mémoire, HTTP, sous-processus stdio).
+> **Vérifié le 29/10/2026 avec MCP Inspector 2.13.0 (CLI)**, contre le binaire réel, PostgreSQL et la source `mock`.
+> - **HTTP** : `tools/list` (15 outils) ; enchaînement `create_extraction_job` → `wait_for_job` (`finished`, 2 280 uniques) → `get_job_results` avec `fields` → `export_job` (blocs texte et `resource_link`) ; `resources/list`, `resources/templates/list` ; `resources/read` d'un morceau d'export (209 lignes, 49 Ko, `_meta.next_uri`) et d'un job ; `prompts/list` et `prompts/get`.
+> - **stdio** : l'Inspector lance `bin/cleads-mcp` et obtient la même liste d'outils. `get_job_errors`, `get_system_health` (clé admin) et la lecture d'un export JSONL fonctionnent ; `get_logs` avec une clé non admin renvoie `forbidden`.
+> - **Portabilité des schémas** (`--strict`) : aucun avertissement sur les schémas d'entrée. Ils sont mono-type, car certains dialectes de déclaration de fonctions refusent `["null", …]`. Il reste 29 avertissements, tous sur des schémas de **sortie** : les types `["null", "array"|"object"]` des slices, maps et pointeurs Go y sont exacts, et le SDK valide chaque résultat contre eux.
+>
+> La progression de `wait_for_job` a été vérifiée séparément : 77 notifications pendant un appel de 75 s, en JSON-RPC brut avec curl, car le mode CLI de l'Inspector ne les affiche pas. L'interface web de l'Inspector n'a pas été ouverte.
 
 À contrôler : les 15 outils, avec leurs annotations et leurs schémas ; `create_extraction_job` avec `{"query":"plombier","center":{"lat":45.76,"lng":4.84},"radius_m":3000}`, puis `wait_for_job` (les notifications de progression s'affichent dans le panneau) ; `export_job`, puis la lecture de la ressource liée et de ses `next_uri` ; les 4 modèles et ressources ; les 2 prompts.
 

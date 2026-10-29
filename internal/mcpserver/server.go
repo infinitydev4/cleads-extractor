@@ -104,6 +104,9 @@ func addTool[In, Out any](s *srv, t *mcp.Tool, h handler[In, Out]) {
 	if t.InputSchema == nil {
 		t.InputSchema = schemaFor[In](nil)
 	}
+	if in, ok := t.InputSchema.(*jsonschema.Schema); ok {
+		singleTyped(in)
+	}
 	if t.OutputSchema == nil {
 		t.OutputSchema = schemaFor[Out](nil)
 	}

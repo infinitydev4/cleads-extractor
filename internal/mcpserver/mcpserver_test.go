@@ -143,6 +143,9 @@ func TestToolCatalog(t *testing.T) {
 			t.Errorf("%s: no output schema", n)
 		}
 		in, _ := json.Marshal(tl.InputSchema)
+		if strings.Contains(string(in), `"null"`) {
+			t.Errorf("%s: input schema has a nullable type (not portable): %s", n, in)
+		}
 		if !strings.Contains(string(in), `"additionalProperties":{"not":{}}`) && !strings.Contains(string(in), `"additionalProperties":false`) {
 			t.Errorf("%s: input schema is not strict: %s", n, in)
 		}

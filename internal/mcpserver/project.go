@@ -39,6 +39,29 @@ func schemaFor[T any](edit func(props map[string]*jsonschema.Schema)) *jsonschem
 	return s
 }
 
+// singleTyped rewrites the nullable types inferred for Go slices, maps and
+// pointers (["null", "array"]) to their single type, recursively. Input
+// schemas become function declarations for models, and some dialects (the
+// OpenAPI subset used by Gemini, for one) accept only one type. Optional
+// arguments are omitted, never sent as null. Output schemas keep null:
+// the SDK validates results, where a nil slice encodes as null.
+func singleTyped(s *jsonschema.Schema) {
+	if s == nil {
+		return
+	}
+	if len(s.Types) == 2 && slices.Contains(s.Types, "null") {
+		for _, t := range s.Types {
+			if t != "null" {
+				s.Type, s.Types = t, nil
+			}
+		}
+	}
+	for _, p := range s.Properties {
+		singleTyped(p)
+	}
+	singleTyped(s.Items)
+}
+
 func enum(p *jsonschema.Schema, vals ...string) {
 	for _, v := range vals {
 		p.Enum = append(p.Enum, v)
