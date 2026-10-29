@@ -34,8 +34,10 @@ type Config struct {
 	Port        string
 	DatabaseURL string
 	DBMaxConns  int32
-	LogLevel    string
-	LogFormat   string
+	// DBStartupWait is how long to wait for the database at startup.
+	DBStartupWait time.Duration
+	LogLevel      string
+	LogFormat     string
 
 	APIKeys        []APIKey
 	AuthDisabled   bool
@@ -99,6 +101,7 @@ func Load() (*Config, error) {
 		Port:           env("PORT", "8080"),
 		DatabaseURL:    os.Getenv("DATABASE_URL"),
 		DBMaxConns:     int32(envInt("DB_MAX_CONNS", 20)),
+		DBStartupWait:  envDuration("DB_STARTUP_WAIT", 60*time.Second),
 		LogLevel:       env("LOG_LEVEL", "info"),
 		LogFormat:      env("LOG_FORMAT", "json"),
 		AuthDisabled:   envBool("AUTH_DISABLED", false),

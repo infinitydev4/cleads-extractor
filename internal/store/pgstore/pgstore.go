@@ -31,8 +31,19 @@ type Store struct {
 	log  *slog.Logger
 }
 
-// Open connects, tunes the pool and applies migrations.
+// DefaultStartupWait is how long Open waits for the database to accept
+// connections. After a host reboot the application containers can start
+// before PostgreSQL is ready: waiting is cleaner than crash-looping.
+const DefaultStartupWait = 60 * time.Second
+
+// Open connects, tunes the pool and applies migrations, waiting up to
+// DefaultStartupWait for the database to become reachable.
 func Open(ctx context.Context, dsn string, maxConns int32, log *slog.Logger) (*Store, error) {
+	return OpenWait(ctx, dsn, maxConns, DefaultStartupWait, log)
+}
+
+// OpenWait is Open with an explicit startup wait; wait <= 0 tries once.
+func OpenWait(ctx context.Context, dsn string, maxConns int32, wait time.Duration, log *slog.Logger) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
@@ -49,17 +60,50 @@ func Open(ctx context.Context, dsn string, maxConns int32, log *slog.Logger) (*S
 		return nil, err
 	}
 	s := &Store{pool: pool, log: log}
-	pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	if err := pool.Ping(pctx); err != nil {
+	if err := s.waitReady(ctx, wait); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("ping database: %w", err)
+		return nil, err
 	}
 	if err := s.migrate(ctx); err != nil {
 		pool.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// waitReady pings until the database answers, backing off from 250 ms to 4 s,
+// and gives up after wait or when ctx is cancelled.
+func (s *Store) waitReady(ctx context.Context, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	backoff := 250 * time.Millisecond
+	for attempt := 1; ; attempt++ {
+		pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := s.pool.Ping(pctx)
+		cancel()
+		if err == nil {
+			if attempt > 1 {
+				s.log.Info("database is ready", "attempts", attempt)
+			}
+			return nil
+		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("waiting for database: %w", ctx.Err())
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("ping database (gave up after %s, %d attempt(s)): %w", wait, attempt, err)
+		}
+		// Use the whole wait: the last sleep is cut short so that one final
+		// attempt happens right at the deadline.
+		pause := min(backoff, remaining)
+		s.log.Warn("database not ready, retrying", "attempt", attempt, "retry_in", pause.String(), "err", err)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for database: %w", ctx.Err())
+		case <-time.After(pause):
+		}
+		backoff = min(backoff*2, 4*time.Second)
+	}
 }
 
 func (s *Store) Close()                         { s.pool.Close() }

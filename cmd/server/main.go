@@ -87,7 +87,7 @@ func run() error {
 
 	var st store.Store
 	if cfg.DatabaseURL != "" {
-		pg, err := pgstore.Open(ctx, cfg.DatabaseURL, cfg.DBMaxConns, log)
+		pg, err := pgstore.OpenWait(ctx, cfg.DatabaseURL, cfg.DBMaxConns, cfg.DBStartupWait, log)
 		if err != nil {
 			return err
 		}
