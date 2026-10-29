@@ -91,6 +91,9 @@ func (s *Server) Handler() http.Handler {
 	root.Handle("/", pub)
 	root.Handle("/v1/", s.auth(priv))
 	root.Handle("/metrics", s.auth(priv))
+	if s.cfg.MCPEnabled {
+		root.Handle("/mcp", s.checkOrigin(s.auth(s.mcpHandler())))
+	}
 	return s.observe(s.security(root))
 }
 

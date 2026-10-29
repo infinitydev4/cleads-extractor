@@ -110,9 +110,9 @@ func (s *Server) security(next http.Handler) http.Handler {
 		if o := r.Header.Get("Origin"); o != "" && (allowed[o] || allowed["*"]) {
 			h.Set("Access-Control-Allow-Origin", o)
 			h.Set("Vary", "Origin")
-			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, Idempotency-Key")
+			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, Idempotency-Key, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID")
 			h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-			h.Set("Access-Control-Expose-Headers", "X-Request-Id, Location")
+			h.Set("Access-Control-Expose-Headers", "X-Request-Id, Location, Mcp-Session-Id, X-Next-Cursor, X-Export-Done, X-Export-Rows")
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
 				return
